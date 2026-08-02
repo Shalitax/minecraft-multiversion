@@ -864,17 +864,67 @@ update_vanilla() {
     fi
 }
 
+# The installer's marker records what IT put on disk, but a version-manager
+# addon can replace the software afterwards without ever touching the marker.
+# So the marker is only trusted while it still agrees with what is actually
+# installed right now.
+# Paper forks all look identical from the outside: a plain jar detected as
+# "vanilla". They do record their own name in version_history.json once they
+# have booted, which is the only way to tell Purpur from Paper on disk.
+# Returns nothing when the file is absent, i.e. before the first boot.
+detect_fork_name() {
+    [ -f version_history.json ] || return 1
+    local current
+    current=$(jq -r '.currentVersion // empty' version_history.json 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    case "${current}" in
+        *purpur*)     echo "purpur" ;;
+        *pufferfish*) echo "pufferfish" ;;
+        *leaves*)     echo "leaves" ;;
+        *folia*)      echo "folia" ;;
+        *paper*)      echo "paper" ;;
+        *)            return 1 ;;
+    esac
+}
+
+marker_matches_type() {
+    local fork
+    case "$1" in
+        # Every Paper fork is a plain jar and detects as "vanilla".
+        paper|purpur|pufferfish|leaves|folia|vanilla)
+            [ "${SERVER_TYPE}" = "vanilla" ] || return 1
+            # Same family, but possibly a different fork than the one recorded.
+            if fork=$(detect_fork_name); then
+                [ "${fork}" = "$1" ] || return 1
+            fi
+            return 0 ;;
+        velocity)  [ "${SERVER_TYPE}" = "velocity" ] ;;
+        waterfall) [ "${SERVER_TYPE}" = "bungeecord" ] ;;
+        fabric)    [ "${SERVER_TYPE}" = "fabric" ] ;;
+        mohist)    [ "${SERVER_TYPE}" = "mohist" ] ;;
+        arclight)  [ "${SERVER_TYPE}" = "arclight" ] ;;
+        *)         return 1 ;;
+    esac
+}
+
 run_auto_update() {
     is_true "${AUTO_UPDATE}" || return 0
 
-    local project="${UPDATE_PROJECT}"
+    local project="${UPDATE_PROJECT}" marker=""
     if is_auto "${project}"; then
         # Purpur, Leaves and Pufferfish are all plain jars and all detect as
         # "vanilla", so guessing the project from the detected type would
         # quietly replace the customer's server software with Paper. What the
         # installer recorded is the only reliable source here.
         if [ -f .multiversion-software ]; then
-            project=$(cat .multiversion-software)
+            marker=$(cat .multiversion-software)
+            if marker_matches_type "${marker}"; then
+                project="${marker}"
+            else
+                log_warn "El software instalado ahora es '${SERVER_TYPE}', pero el egg registro '${marker}'."
+                log_warn "Seguramente se cambio desde el gestor de versiones. No se actualizara nada."
+                log_warn "Si quieres actualizaciones automaticas, elige el software a mano en 'Que actualizar'."
+                return 0
+            fi
         else
             case "${SERVER_TYPE}" in
                 velocity)   project="velocity" ;;
