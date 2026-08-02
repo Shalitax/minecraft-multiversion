@@ -28,18 +28,10 @@ log_warn()  { echo "${C_WARN}[!]${C_RESET} $*"; }
 log_error() { echo "${C_ERR}[x]${C_RESET} $*"; }
 log_ok()    { echo "${C_OK}[+]${C_RESET} $*"; }
 
-# Accepts the Spanish panel labels as well as the raw boolean styles, so eggs
-# and servers created before the labels existed keep working unchanged.
-is_true() {
-    case "$(normalize_value "${1}")" in
-        1|true|yes|on|enabled|si|activado|activada) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 # Lowercases and strips Spanish accents, so a panel label can be written with
-# or without them and still match. Also means a mojibaked value simply fails to
-# match and is skipped, rather than being written into server.properties.
+# or without them and still match. A mojibaked value simply fails to match and
+# is skipped, rather than being written into server.properties.
+#
 # Literal byte-sequence replacements rather than character classes: a class
 # like [Áá] is matched byte by byte outside a UTF-8 locale and silently fails,
 # which is exactly the kind of bug that only shows up in production.
@@ -53,6 +45,15 @@ normalize_value() {
               -e 's/Ü/U/g' -e 's/ü/u/g' \
               -e 's/Ñ/N/g' -e 's/ñ/n/g' \
         | tr '[:upper:]' '[:lower:]'
+}
+
+# Accepts the Spanish panel labels as well as the raw boolean styles, so eggs
+# and servers created before the labels existed keep working unchanged.
+is_true() {
+    case "$(normalize_value "${1}")" in
+        1|true|yes|on|enabled|si|activado|activada) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Empty and the various "leave it alone" labels mean: do not touch the file.
@@ -116,7 +117,7 @@ JAVA_RAW=$(java -version 2>&1 | head -1 | cut -d'"' -f2)
 JAVA_MAJOR=$(echo "${JAVA_RAW}" | sed -e 's/^1\.//' -e 's/[.+-].*//')
 [ -z "${JAVA_MAJOR}" ] && JAVA_MAJOR=0
 
-log_info "Java ${JAVA_RAW} (feature version ${JAVA_MAJOR}) | TZ ${TZ} | IP ${INTERNAL_IP}"
+log_info "Java ${JAVA_RAW} (version ${JAVA_MAJOR}) | Zona horaria ${TZ} | IP ${INTERNAL_IP}"
 
 # HTTP client defaults. Fill v3 rejects requests without a descriptive
 # User-Agent, so every curl call in this script goes through these.
@@ -154,7 +155,7 @@ detect_server_type() {
     # Explicit override from the panel wins over detection.
     if ! is_auto "${SERVER_TYPE_OVERRIDE}"; then
         SERVER_TYPE=$(echo "${SERVER_TYPE_OVERRIDE}" | tr '[:upper:]' '[:lower:]')
-        log_info "Server type forced to '${SERVER_TYPE}' by the panel"
+        log_info "Tipo de servidor forzado desde el panel: '${SERVER_TYPE}'"
     elif [ -f "velocity.toml" ]; then
         SERVER_TYPE="velocity"
     elif [ -f "config.yml" ] && grep -qE '^\s*listeners:' config.yml 2>/dev/null; then
@@ -370,7 +371,7 @@ optimize_configs() {
     # NeoForge, Fabric or Quilt servers, have nothing to tune here.
     case "${SERVER_TYPE}" in
         vanilla|mohist|arclight) ;;
-        *) log_info "Optimizacion de configs: no aplica a '${SERVER_TYPE}', se omite"; return 0 ;;
+        *) log_info "Configuracion optimizada: no aplica a '${SERVER_TYPE}', se omite"; return 0 ;;
     esac
 
     if [ -f "${OPTIMIZE_MARKER}" ] && [ "$(cat "${OPTIMIZE_MARKER}")" = "${OPTIMIZE_PRESET_VERSION}" ]; then
@@ -695,30 +696,30 @@ update_paper_family() {
 
     if is_auto "${version}" || [ "${version}" = "latest" ]; then
         version=$(paper_latest_version "${project}")
-        [ -z "${version}" ] && { log_warn "Could not resolve the latest ${project} version, skipping update"; return 1; }
+        [ -z "${version}" ] && { log_warn "No se pudo determinar la ultima version de ${project}, se omite"; return 1; }
     fi
 
     local result build url
     result=$(paper_latest_build "${project}" "${version}" "${channel}")
-    [ -z "${result}" ] && { log_warn "No ${project} builds found for ${version}, skipping update"; return 1; }
+    [ -z "${result}" ] && { log_warn "No hay builds de ${project} para ${version}, se omite"; return 1; }
 
     build=${result%% *}
     url=${result#* }
 
     local marker="${project}-${version}-${build}"
     if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "${marker}" ] && [ -f "${SERVER_JARFILE}" ]; then
-        log_ok "${project} ${version} build ${build} is already up to date"
+        log_ok "${project} ${version} build ${build} ya esta actualizado"
         return 0
     fi
 
-    log_info "Downloading ${project} ${version} build ${build}"
+    log_info "Descargando ${project} ${version} build ${build}"
     if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" "${url}"; then
         mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
         echo "${marker}" > "${STATE_FILE}"
-        log_ok "Updated to ${project} ${version} build ${build}"
+        log_ok "Actualizado a ${project} ${version} build ${build}"
     else
         rm -f "${SERVER_JARFILE}.tmp"
-        log_error "Download failed, keeping the current jar"
+        log_error "Fallo la descarga, se mantiene la version actual"
         return 1
     fi
 }
@@ -728,27 +729,27 @@ update_purpur() {
 
     if is_auto "${version}" || [ "${version}" = "latest" ]; then
         version=$(curl "${CURL_OPTS[@]}" "https://api.purpurmc.org/v2/purpur" 2>/dev/null | jq -r '.metadata.current // .versions[-1] // empty')
-        [ -z "${version}" ] && { log_warn "Could not resolve the latest Purpur version, skipping update"; return 1; }
+        [ -z "${version}" ] && { log_warn "No se pudo determinar la ultima version de Purpur, se omite"; return 1; }
     fi
 
     local build
     build=$(curl "${CURL_OPTS[@]}" "https://api.purpurmc.org/v2/purpur/${version}" 2>/dev/null | jq -r '.builds.latest // empty')
-    [ -z "${build}" ] && { log_warn "No Purpur builds found for ${version}, skipping update"; return 1; }
+    [ -z "${build}" ] && { log_warn "No hay builds de Purpur para ${version}, se omite"; return 1; }
 
     local marker="purpur-${version}-${build}"
     if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "${marker}" ] && [ -f "${SERVER_JARFILE}" ]; then
-        log_ok "Purpur ${version} build ${build} is already up to date"
+        log_ok "Purpur ${version} build ${build} ya esta actualizado"
         return 0
     fi
 
-    log_info "Downloading Purpur ${version} build ${build}"
+    log_info "Descargando Purpur ${version} build ${build}"
     if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" "https://api.purpurmc.org/v2/purpur/${version}/${build}/download"; then
         mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
         echo "${marker}" > "${STATE_FILE}"
-        log_ok "Updated to Purpur ${version} build ${build}"
+        log_ok "Actualizado a Purpur ${version} build ${build}"
     else
         rm -f "${SERVER_JARFILE}.tmp"
-        log_error "Download failed, keeping the current jar"
+        log_error "Fallo la descarga, se mantiene la version actual"
         return 1
     fi
 }
@@ -831,7 +832,7 @@ update_vanilla() {
     local manifest="https://launchermeta.mojang.com/mc/game/version_manifest.json"
     local json
     json=$(curl "${CURL_OPTS[@]}" "${manifest}" 2>/dev/null)
-    [ -z "${json}" ] && { log_warn "Could not reach the Mojang manifest, skipping update"; return 1; }
+    [ -z "${json}" ] && { log_warn "No se pudo contactar con el servidor de Mojang, se omite"; return 1; }
 
     if is_auto "${version}" || [ "${version}" = "latest" ]; then
         version=$(echo "${json}" | jq -r '.latest.release')
@@ -841,25 +842,25 @@ update_vanilla() {
 
     local marker="vanilla-${version}"
     if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "${marker}" ] && [ -f "${SERVER_JARFILE}" ]; then
-        log_ok "Vanilla ${version} is already up to date"
+        log_ok "Vanilla ${version} ya esta actualizado"
         return 0
     fi
 
     local version_url download_url
     version_url=$(echo "${json}" | jq -r --arg v "${version}" '.versions[] | select(.id == $v) | .url')
-    [ -z "${version_url}" ] && { log_warn "Vanilla version ${version} not found, skipping update"; return 1; }
+    [ -z "${version_url}" ] && { log_warn "No existe la version de Vanilla ${version}, se omite"; return 1; }
 
     download_url=$(curl "${CURL_OPTS[@]}" "${version_url}" 2>/dev/null | jq -r '.downloads.server.url // empty')
-    [ -z "${download_url}" ] && { log_warn "Vanilla ${version} has no server jar, skipping update"; return 1; }
+    [ -z "${download_url}" ] && { log_warn "Vanilla ${version} no tiene archivo de servidor, se omite"; return 1; }
 
-    log_info "Downloading Vanilla ${version}"
+    log_info "Descargando Vanilla ${version}"
     if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" "${download_url}"; then
         mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
         echo "${marker}" > "${STATE_FILE}"
-        log_ok "Updated to Vanilla ${version}"
+        log_ok "Actualizado a Vanilla ${version}"
     else
         rm -f "${SERVER_JARFILE}.tmp"
-        log_error "Download failed, keeping the current jar"
+        log_error "Fallo la descarga, se mantiene la version actual"
         return 1
     fi
 }
@@ -973,10 +974,10 @@ build_memory_flags() {
         # Let the JVM size the heap from the container limit instead of pinning
         # Xmx to the full allocation, which leaves headroom for native memory.
         JVM_FLAGS+=("-XX:MaxRAMPercentage=${MAX_RAM_PERCENTAGE:-80.0}")
-        log_info "Heap: MaxRAMPercentage=${MAX_RAM_PERCENTAGE:-80.0} (Xmx disabled)"
+        log_info "Memoria: hasta ${MAX_RAM_PERCENTAGE:-80.0}% del total (reserva para el sistema activada)"
     else
         JVM_FLAGS+=("-Xms${xms}M" "-Xmx${SERVER_MEMORY}M")
-        log_info "Heap: -Xms${xms}M -Xmx${SERVER_MEMORY}M"
+        log_info "Memoria: ${xms} MB minimo, ${SERVER_MEMORY} MB maximo"
     fi
 }
 
@@ -1009,7 +1010,7 @@ build_gc_flags() {
             -Dusing.aikars.flags=https://mcflags.emc.gs
             -Daikars.new.flags=true
         )
-        log_ok "Aikar's flags enabled"
+        log_ok "Optimizaciones de Aikar activadas"
         return 0
     fi
 
@@ -1023,36 +1024,36 @@ build_gc_flags() {
             -XX:+AlwaysPreTouch
             -XX:MaxInlineLevel=15
         )
-        log_ok "Velocity recommended flags enabled"
+        log_ok "Optimizaciones recomendadas de Velocity activadas"
         return 0
     fi
 
     case "${gc}" in
         g1)
             JVM_FLAGS+=(-XX:+UseG1GC)
-            log_info "GC: G1" ;;
+            log_info "Recolector de memoria: G1" ;;
         zgc)
             if [ "${JAVA_MAJOR}" -ge 15 ]; then
                 JVM_FLAGS+=(-XX:+UseZGC)
-                log_info "GC: ZGC"
+                log_info "Recolector de memoria: ZGC"
             else
-                log_warn "ZGC needs Java 15+, falling back to the JVM default"
+                log_warn "ZGC necesita Java 15 o superior. Se usa el recolector por defecto."
             fi ;;
         zgc-gen|generational-zgc)
             if [ "${JAVA_MAJOR}" -ge 24 ]; then
                 # Generational mode is the default from 24 onwards and the
                 # explicit flag was removed, so passing it aborts the JVM.
                 JVM_FLAGS+=(-XX:+UseZGC)
-                log_info "GC: Generational ZGC (default on Java ${JAVA_MAJOR})"
+                log_info "Recolector de memoria: ZGC generacional (por defecto en Java ${JAVA_MAJOR})"
             elif [ "${JAVA_MAJOR}" -ge 21 ]; then
                 JVM_FLAGS+=(-XX:+UseZGC -XX:+ZGenerational)
-                log_info "GC: Generational ZGC"
+                log_info "Recolector de memoria: ZGC generacional"
             else
-                log_warn "Generational ZGC needs Java 21+, falling back to the JVM default"
+                log_warn "ZGC generacional necesita Java 21 o superior. Se usa el recolector por defecto."
             fi ;;
         shenandoah)
             JVM_FLAGS+=(-XX:+UnlockExperimentalVMOptions -XX:+UseShenandoahGC)
-            log_info "GC: Shenandoah (only available on some JVM builds)" ;;
+            log_info "Recolector de memoria: Shenandoah (no disponible en todas las imagenes)" ;;
         *)
             : ;;
     esac
@@ -1065,15 +1066,15 @@ build_compat_flags() {
 
     if is_true "${LOG4J2_VULN_WORKAROUND}"; then
         JVM_FLAGS+=(-Dlog4j2.formatMsgNoLookups=true)
-        log_warn "Log4j2 mitigation enabled. This is not a substitute for running a patched build."
+        log_warn "Proteccion Log4j2 activada. No sustituye a actualizar el servidor a una version parcheada."
     fi
 
     if is_true "${SIMD_OPERATIONS}"; then
         if [ "${JAVA_MAJOR}" -ge 16 ]; then
             JVM_FLAGS+=(--add-modules=jdk.incubator.vector)
-            log_info "SIMD (incubator vector module) enabled"
+            log_info "Operaciones SIMD activadas"
         else
-            log_warn "SIMD needs Java 16+, skipping"
+            log_warn "Las operaciones SIMD necesitan Java 16 o superior, se omiten"
         fi
     fi
 
@@ -1083,7 +1084,7 @@ build_compat_flags() {
         # Deliberately unquoted: the user is supplying a flag list.
         # shellcheck disable=SC2206
         JVM_FLAGS+=(${EXTRA_JAVA_ARGS})
-        log_info "Extra JVM args: ${EXTRA_JAVA_ARGS}"
+        log_info "Argumentos Java adicionales: ${EXTRA_JAVA_ARGS}"
     fi
 }
 
@@ -1113,12 +1114,12 @@ validate() {
     # The launch target must actually exist.
     if [ -n "${ARGS_FILE}" ]; then
         if [ ! -f "${ARGS_FILE}" ]; then
-            log_error "Args file '${ARGS_FILE}' is missing. Reinstall the server from the panel."
+            log_error "Falta el archivo de argumentos '${ARGS_FILE}'. Reinstala el servidor desde el panel."
             return 1
         fi
     elif [ ! -f "${SERVER_JARFILE}" ]; then
-        log_error "Server jar '${SERVER_JARFILE}' not found in /home/container."
-        log_error "Check the 'Server Jar File' variable, or reinstall the server."
+        log_error "No se encuentra el archivo '${SERVER_JARFILE}' en la carpeta del servidor."
+        log_error "Revisa la opcion 'Archivo JAR del servidor', o reinstala el servidor."
         return 1
     fi
 
@@ -1132,15 +1133,15 @@ validate() {
             local need
             need=$(required_java_for "${mc}")
             if [ "${need}" -gt 0 ] && [ "${JAVA_MAJOR}" -lt "${need}" ]; then
-                log_warn "Minecraft ${mc} needs Java ${need}+, but this image has Java ${JAVA_MAJOR}."
-                log_warn "Change the Docker image in the panel or the server will fail to start."
+                log_warn "Minecraft ${mc} necesita Java ${need} o superior, y esta imagen tiene Java ${JAVA_MAJOR}."
+                log_warn "Cambia la version de Java en el panel o el servidor no arrancara."
             fi
         fi
     fi
 
     if [ "${IS_PROXY}" != "1" ] && ! grep -q '^eula=true' eula.txt 2>/dev/null; then
-        log_warn "The EULA has not been accepted. The server will shut down immediately."
-        log_warn "Set the EULA variable to true, or edit eula.txt."
+        log_warn "El EULA no esta aceptado. El servidor se cerrara nada mas arrancar."
+        log_warn "Activa la opcion 'Aceptar el EULA de Minecraft' o edita el archivo eula.txt."
     fi
 
     return 0
@@ -1162,7 +1163,7 @@ build_command() {
         CMD+=("@${ARGS_FILE}" nogui)
     else
         if [ -n "${ARGS_FILE}" ]; then
-            log_warn "Args file '${ARGS_FILE}' disappeared, falling back to -jar ${SERVER_JARFILE}"
+            log_warn "El archivo de argumentos '${ARGS_FILE}' ya no existe. Se arranca con ${SERVER_JARFILE}."
         fi
         CMD+=(-jar "${SERVER_JARFILE}")
         # Proxies have no GUI to disable and will reject the argument.
@@ -1193,7 +1194,7 @@ build_command_manual() {
 # ---------------------------------------------------------------------------
 
 detect_server_type
-log_ok "Detected server software: ${SERVER_TYPE}$([ -n "${ARGS_FILE}" ] && echo " (args: ${ARGS_FILE})")"
+log_ok "Software detectado: ${SERVER_TYPE}$([ -n "${ARGS_FILE}" ] && echo " (args: ${ARGS_FILE})")"
 
 run_auto_update
 
@@ -1210,12 +1211,12 @@ optimize_configs
 install_geyser
 scan_client_mods
 
+print_diagnostics
+
 if ! validate; then
     log_error "Las comprobaciones previas fallaron. No se puede arrancar el servidor."
     exit 1
 fi
-
-print_diagnostics
 
 STARTUP_MODE=$(echo "${STARTUP_MODE:-auto}" | tr '[:upper:]' '[:lower:]')
 
