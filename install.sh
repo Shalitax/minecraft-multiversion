@@ -14,6 +14,36 @@ set -e
 mkdir -p /mnt/server
 cd /mnt/server
 
+# ---------------------------------------------------------------------------
+# Optional wipe
+#
+# Pterodactyl runs this script both when the server is created and when the
+# customer hits "Reinstall". On creation /mnt/server is empty, so this only
+# ever has an effect on a reinstall.
+# ---------------------------------------------------------------------------
+case "$(echo "${WIPE_ON_INSTALL:-1}" | tr '[:upper:]' '[:lower:]')" in
+    0|false|no|desactivado)
+        echo "Reinstalacion sin borrado: se conservan los archivos existentes."
+        ;;
+    *)
+        if [ -n "$(ls -A /mnt/server 2>/dev/null)" ]; then
+            echo "=================================================="
+            echo " BORRANDO todos los archivos del servidor"
+            echo " Esto incluye mundos, plugins y configuraciones."
+            echo "=================================================="
+            sleep 5
+
+            # -mindepth 1 alcanza tambien los archivos ocultos. Un
+            # 'rm -rf /mnt/server/*' no los toca, y las marcas del egg
+            # (.multiversion-optimized, -software, -update) sobrevivirian a la
+            # reinstalacion dejando al servidor nuevo con estado del anterior.
+            find /mnt/server -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+
+            echo "Archivos eliminados. Empezando desde cero."
+        fi
+        ;;
+esac
+
 UA="pterodactyl-mc-multiversion/1.0 (+https://hexservers.com)"
 fetch() { curl -sSL --fail --retry 3 --retry-delay 2 -A "${UA}" "$@"; }
 
