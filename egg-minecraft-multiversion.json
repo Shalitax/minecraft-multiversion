@@ -1,0 +1,392 @@
+{
+    "_comment": "Minecraft Multiversion egg. The startup logic lives in the container entrypoint, not here.",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-08-02T01:33:29.669Z",
+    "name": "Minecraft Multiversion",
+    "author": "legendofzeldacartoon@gmail.com",
+    "description": "A single egg for every Java Minecraft server. The container entrypoint detects at boot whether the installed software is Vanilla, Paper, Purpur, Spigot, Forge, NeoForge, Fabric, Quilt, Velocity, BungeeCord or Waterfall, and builds the right startup command for it. Because detection reads what is on disk, an external installer module can swap the software at any time without changing the egg. Adds panel toggles for server.properties (online-mode, difficulty, view distance and more), JVM tuning, optional auto-update and pre-flight validation. REQUIRES the matching custom Docker images.",
+    "features": [
+        "eula",
+        "java_version",
+        "pid_limit"
+    ],
+    "docker_images": {
+        "Java 8": "ghcr.io/shalitax/minecraft-multiversion:java_8",
+        "Java 8 (OpenJ9)": "ghcr.io/shalitax/minecraft-multiversion:java_8j9",
+        "Java 11": "ghcr.io/shalitax/minecraft-multiversion:java_11",
+        "Java 11 (OpenJ9)": "ghcr.io/shalitax/minecraft-multiversion:java_11j9",
+        "Java 16": "ghcr.io/shalitax/minecraft-multiversion:java_16",
+        "Java 16 (OpenJ9)": "ghcr.io/shalitax/minecraft-multiversion:java_16j9",
+        "Java 17": "ghcr.io/shalitax/minecraft-multiversion:java_17",
+        "Java 17 (OpenJ9)": "ghcr.io/shalitax/minecraft-multiversion:java_17j9",
+        "Java 18": "ghcr.io/shalitax/minecraft-multiversion:java_18",
+        "Java 18 (OpenJ9)": "ghcr.io/shalitax/minecraft-multiversion:java_18j9",
+        "Java 19": "ghcr.io/shalitax/minecraft-multiversion:java_19",
+        "Java 19 (OpenJ9)": "ghcr.io/shalitax/minecraft-multiversion:java_19j9",
+        "Java 21": "ghcr.io/shalitax/minecraft-multiversion:java_21",
+        "Java 22": "ghcr.io/shalitax/minecraft-multiversion:java_22",
+        "Java 23": "ghcr.io/shalitax/minecraft-multiversion:java_23",
+        "Java 24": "ghcr.io/shalitax/minecraft-multiversion:java_24",
+        "Java 25": "ghcr.io/shalitax/minecraft-multiversion:java_25"
+    },
+    "file_denylist": [],
+    "startup": "java -Xms{{SERVER_MIN_MEMORY}}M -Xmx{{SERVER_MEMORY}}M -jar {{SERVER_JARFILE}} nogui",
+    "config": {
+        "files": "{\n    \"server.properties\": {\n        \"parser\": \"properties\",\n        \"find\": {\n            \"server-ip\": \"0.0.0.0\",\n            \"server-port\": \"{{server.build.default.port}}\",\n            \"query.port\": \"{{server.build.default.port}}\"\n        }\n    }\n}",
+        "startup": "{\n    \"done\": [\n        \")! For help, type \",\n        \"Done (\",\n        \"Listening on \"\n    ]\n}",
+        "logs": "{}",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/ash\n#\n# Install script for the Minecraft Multiversion egg.\n# Runs in ghcr.io/pterodactyl/installers:alpine. Server files go to /mnt/server.\n#\n# This only has to place the initial files. The entrypoint detects whatever is\n# on disk at boot, so an external installer module can replace the software at\n# any time without touching the egg.\n#\nset -e\n\nmkdir -p /mnt/server\ncd /mnt/server\n\nUA=\"pterodactyl-mc-multiversion/1.0 (+https://pterodactyl.io)\"\nfetch() { curl -sSL --fail --retry 3 --retry-delay 2 -A \"${UA}\" \"$@\"; }\n\nSOFTWARE=$(echo \"${SERVER_SOFTWARE:-paper}\" | tr '[:upper:]' '[:lower:]')\nVERSION=\"${SERVER_VERSION:-latest}\"\nCHANNEL=\"${UPDATE_CHANNEL:-STABLE}\"\nJARFILE=\"${SERVER_JARFILE:-server.jar}\"\n\necho \"==================================================\"\necho \" Software : ${SOFTWARE}\"\necho \" Version  : ${VERSION}\"\necho \" Jar file : ${JARFILE}\"\necho \"==================================================\"\n\nif [ \"${SOFTWARE}\" = \"none\" ]; then\n    echo \"SERVER_SOFTWARE is 'none'. Skipping download.\"\n    echo \"Use your installer module to place the server files.\"\n    exit 0\nfi\n\n# --- PaperMC family (paper, folia, velocity, waterfall) --------------------\n# api.papermc.io/v2 was shut down on 2026-07-01; everything goes through the\n# Fill v3 API, which rejects requests without a descriptive User-Agent.\ninstall_paper_family() {\n    PROJECT=\"$1\"\n\n    # Released versions are preferred over in-development ones: Velocity's\n    # newest entry is a -SNAPSHOT branch, and \"latest\" should not land there.\n    # Filtering by build channel does not help, since snapshot versions still\n    # publish their builds under the STABLE channel.\n    if [ \"${VERSION}\" = \"latest\" ] || [ -z \"${VERSION}\" ]; then\n        VERSION=$(fetch \"https://fill.papermc.io/v3/projects/${PROJECT}\" | jq -r '\n            [ .versions | to_entries[] | .value[] ] as $all\n            | ( [ $all[] | select(test(\"-(SNAPSHOT|rc|pre)\") | not) ][0] // $all[0] // empty )')\n        echo \"Resolved latest ${PROJECT} version: ${VERSION}\"\n    fi\n\n    if [ -z \"${VERSION}\" ]; then\n        echo \"ERROR: could not resolve a version for ${PROJECT}.\" >&2\n        exit 1\n    fi\n\n    URL=$(fetch \"https://fill.papermc.io/v3/projects/${PROJECT}/versions/${VERSION}/builds\" \\\n        | jq -r --arg ch \"${CHANNEL}\" '\n            ( [ .[] | select(.channel == $ch) ][0] // .[0] ) as $b\n            | if $b == null then empty else $b.downloads[\"server:default\"].url end')\n\n    if [ -z \"${URL}\" ]; then\n        echo \"ERROR: no builds found for ${PROJECT} ${VERSION}.\" >&2\n        exit 1\n    fi\n\n    echo \"Downloading ${URL}\"\n    fetch -o \"${JARFILE}\" \"${URL}\"\n}\n\n# --- Purpur ----------------------------------------------------------------\ninstall_purpur() {\n    if [ \"${VERSION}\" = \"latest\" ] || [ -z \"${VERSION}\" ]; then\n        VERSION=$(fetch \"https://api.purpurmc.org/v2/purpur\" | jq -r '.metadata.current // .versions[-1]')\n        echo \"Resolved latest Purpur version: ${VERSION}\"\n    fi\n\n    echo \"Downloading Purpur ${VERSION}\"\n    fetch -o \"${JARFILE}\" \"https://api.purpurmc.org/v2/purpur/${VERSION}/latest/download\"\n}\n\n# --- Vanilla ---------------------------------------------------------------\ninstall_vanilla() {\n    MANIFEST=\"https://launchermeta.mojang.com/mc/game/version_manifest.json\"\n\n    if [ \"${VERSION}\" = \"latest\" ] || [ -z \"${VERSION}\" ]; then\n        VERSION=$(fetch \"${MANIFEST}\" | jq -r '.latest.release')\n    elif [ \"${VERSION}\" = \"snapshot\" ]; then\n        VERSION=$(fetch \"${MANIFEST}\" | jq -r '.latest.snapshot')\n    fi\n    echo \"Resolved Vanilla version: ${VERSION}\"\n\n    VERSION_URL=$(fetch \"${MANIFEST}\" | jq -r --arg v \"${VERSION}\" '.versions[] | select(.id == $v) | .url')\n    if [ -z \"${VERSION_URL}\" ]; then\n        echo \"ERROR: Vanilla version ${VERSION} not found.\" >&2\n        exit 1\n    fi\n\n    DOWNLOAD_URL=$(fetch \"${VERSION_URL}\" | jq -r '.downloads.server.url')\n    echo \"Downloading ${DOWNLOAD_URL}\"\n    fetch -o \"${JARFILE}\" \"${DOWNLOAD_URL}\"\n}\n\n# --- Fabric ----------------------------------------------------------------\n# Fabric publishes a ready-made launcher jar, so no installer run is needed.\ninstall_fabric() {\n    if [ \"${VERSION}\" = \"latest\" ] || [ -z \"${VERSION}\" ]; then\n        VERSION=$(fetch \"https://meta.fabricmc.net/v2/versions/game\" | jq -r '[.[] | select(.stable == true)][0].version')\n    fi\n    LOADER=$(fetch \"https://meta.fabricmc.net/v2/versions/loader\" | jq -r '[.[] | select(.stable == true)][0].version')\n    INSTALLER=$(fetch \"https://meta.fabricmc.net/v2/versions/installer\" | jq -r '[.[] | select(.stable == true)][0].version')\n\n    echo \"Fabric: game ${VERSION}, loader ${LOADER}, installer ${INSTALLER}\"\n    fetch -o \"${JARFILE}\" \\\n        \"https://meta.fabricmc.net/v2/versions/loader/${VERSION}/${LOADER}/${INSTALLER}/server/jar\"\n}\n\ncase \"${SOFTWARE}\" in\n    paper|folia|velocity|waterfall) install_paper_family \"${SOFTWARE}\" ;;\n    purpur)                         install_purpur ;;\n    vanilla)                        install_vanilla ;;\n    fabric)                         install_fabric ;;\n    *)\n        echo \"ERROR: unknown SERVER_SOFTWARE '${SOFTWARE}'.\" >&2\n        echo \"Valid values: paper, folia, purpur, vanilla, fabric, velocity, waterfall, none\" >&2\n        exit 1\n        ;;\nesac\n\nif [ ! -s \"${JARFILE}\" ]; then\n    echo \"ERROR: ${JARFILE} is missing or empty after download.\" >&2\n    exit 1\nfi\n\n# Proxies have no EULA and no server.properties.\ncase \"${SOFTWARE}\" in\n    velocity|waterfall) ;;\n    *)\n        if [ \"${EULA}\" = \"true\" ] || [ \"${EULA}\" = \"1\" ]; then\n            echo \"eula=true\" > eula.txt\n            echo \"EULA accepted.\"\n        fi\n        [ -f server.properties ] || touch server.properties\n        ;;\nesac\n\necho \"Downloaded $(du -h \"${JARFILE}\" | cut -f1) to ${JARFILE}\"\necho \"Install complete.\"\n",
+            "container": "ghcr.io/pterodactyl/installers:alpine",
+            "entrypoint": "ash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Server Software",
+            "description": "Software to download on install/reinstall. Use \"none\" if an external installer module places the files. Valid: paper, folia, purpur, vanilla, fabric, velocity, waterfall, none.",
+            "env_variable": "SERVER_SOFTWARE",
+            "default_value": "paper",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:paper,folia,purpur,vanilla,fabric,velocity,waterfall,none",
+            "field_type": "text"
+        },
+        {
+            "name": "Server Version",
+            "description": "Minecraft version to install. \"latest\" picks the newest release, \"snapshot\" works for vanilla only. Only applied on install/reinstall.",
+            "env_variable": "SERVER_VERSION",
+            "default_value": "latest",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:20",
+            "field_type": "text"
+        },
+        {
+            "name": "Server Jar File",
+            "description": "Name of the jar the server runs from. Ignored for Forge/NeoForge 1.17+, which launch from their args file instead.",
+            "env_variable": "SERVER_JARFILE",
+            "default_value": "server.jar",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|regex:/^([\\w\\d._-]+)(\\.jar)$/",
+            "field_type": "text"
+        },
+        {
+            "name": "Server Type Override",
+            "description": "Force a server type instead of auto-detecting it. \"auto\" is almost always correct. Valid: auto, vanilla, forge, neoforge, fabric, quilt, velocity, bungeecord.",
+            "env_variable": "SERVER_TYPE_OVERRIDE",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:auto,vanilla,forge,neoforge,fabric,quilt,velocity,bungeecord",
+            "field_type": "text"
+        },
+        {
+            "name": "Startup Mode",
+            "description": "\"auto\" builds the java command from the detected software and the toggles below (recommended). \"manual\" runs the Startup Command above verbatim, only injecting flags.",
+            "env_variable": "STARTUP_MODE",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:auto,manual",
+            "field_type": "text"
+        },
+        {
+            "name": "Minimum Memory (MB)",
+            "description": "Value for -Xms. Leave at 128 unless you know you need otherwise.",
+            "env_variable": "SERVER_MIN_MEMORY",
+            "default_value": "128",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:64,65536",
+            "field_type": "text"
+        },
+        {
+            "name": "Extra Java Arguments",
+            "description": "Additional JVM flags appended to the command, space separated. Example: -Dfile.encoding=UTF-8 -XX:+UseStringDeduplication",
+            "env_variable": "EXTRA_JAVA_ARGS",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:512",
+            "field_type": "text"
+        },
+        {
+            "name": "Timezone",
+            "description": "Timezone for the JVM and container, e.g. UTC, America/Santiago, Europe/Madrid.",
+            "env_variable": "TZ",
+            "default_value": "UTC",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:64",
+            "field_type": "text"
+        },
+        {
+            "name": "Aikar's Flags",
+            "description": "Enable Aikar's G1GC tuning. Recommended for Paper/Purpur/Spigot. Velocity automatically gets its own recommended flag set instead.",
+            "env_variable": "AIKAR_FLAGS",
+            "default_value": "1",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Garbage Collector",
+            "description": "Only used when Aikar's Flags is off. Valid: auto, g1, zgc, zgc-gen, shenandoah. ZGC needs Java 15+, zgc-gen needs Java 21+.",
+            "env_variable": "GC_TYPE",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:auto,g1,zgc,zgc-gen,shenandoah",
+            "field_type": "text"
+        },
+        {
+            "name": "Use MaxRAMPercentage",
+            "description": "Replace -Xmx with -XX:MaxRAMPercentage so the JVM leaves headroom for native memory. Helps with modpacks that get OOM-killed.",
+            "env_variable": "LOWER_XMX",
+            "default_value": "0",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Max RAM Percentage",
+            "description": "Heap percentage used when the option above is enabled.",
+            "env_variable": "MAX_RAM_PERCENTAGE",
+            "default_value": "80.0",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|numeric|between:10,95",
+            "field_type": "text"
+        },
+        {
+            "name": "SIMD Operations",
+            "description": "Adds --add-modules=jdk.incubator.vector, used by Pufferfish/Purpur for faster math. Needs Java 16+ and is ignored otherwise.",
+            "env_variable": "SIMD_OPERATIONS",
+            "default_value": "0",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Log4j2 Mitigation",
+            "description": "Adds -Dlog4j2.formatMsgNoLookups=true. Only useful on unpatched builds; update the server instead where possible.",
+            "env_variable": "LOG4J2_VULN_WORKAROUND",
+            "default_value": "0",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Online Mode",
+            "description": "Verify players against Mojang. Set to \"auto\" to leave server.properties untouched and manage it by hand. Also applied to velocity.toml / BungeeCord config.yml.",
+            "env_variable": "MC_ONLINE_MODE",
+            "default_value": "true",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:true,false,auto",
+            "field_type": "text"
+        },
+        {
+            "name": "Difficulty",
+            "description": "peaceful, easy, normal, hard, or auto to leave it alone.",
+            "env_variable": "MC_DIFFICULTY",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:peaceful,easy,normal,hard,auto",
+            "field_type": "text"
+        },
+        {
+            "name": "Gamemode",
+            "description": "survival, creative, adventure, spectator, or auto.",
+            "env_variable": "MC_GAMEMODE",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:survival,creative,adventure,spectator,auto",
+            "field_type": "text"
+        },
+        {
+            "name": "PvP",
+            "description": "true, false, or auto.",
+            "env_variable": "MC_PVP",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:true,false,auto",
+            "field_type": "text"
+        },
+        {
+            "name": "Hardcore",
+            "description": "true, false, or auto.",
+            "env_variable": "MC_HARDCORE",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:true,false,auto",
+            "field_type": "text"
+        },
+        {
+            "name": "Max Players",
+            "description": "Player slot limit, or auto.",
+            "env_variable": "MC_MAX_PLAYERS",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:6",
+            "field_type": "text"
+        },
+        {
+            "name": "View Distance",
+            "description": "Chunk render distance (3-32), or auto. Lowering this is the single biggest performance win on a busy server.",
+            "env_variable": "MC_VIEW_DISTANCE",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:6",
+            "field_type": "text"
+        },
+        {
+            "name": "Simulation Distance",
+            "description": "Chunk tick distance (3-32), or auto.",
+            "env_variable": "MC_SIMULATION_DISTANCE",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:6",
+            "field_type": "text"
+        },
+        {
+            "name": "Max Tick Time",
+            "description": "Watchdog timeout in milliseconds. Use -1 to disable the watchdog on heavy modpacks, or auto.",
+            "env_variable": "MC_MAX_TICK_TIME",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:10",
+            "field_type": "text"
+        },
+        {
+            "name": "MOTD",
+            "description": "Server list message. Use auto to leave it alone. Colour codes with the section sign work.",
+            "env_variable": "MC_MOTD",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:200",
+            "field_type": "text"
+        },
+        {
+            "name": "Whitelist",
+            "description": "true, false, or auto. Maps to white-list in server.properties.",
+            "env_variable": "MC_WHITELIST",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:true,false,auto",
+            "field_type": "text"
+        },
+        {
+            "name": "Enforce Secure Profile",
+            "description": "Requires signed chat (1.19+). Set to false for offline-mode or proxy backends, or auto.",
+            "env_variable": "MC_ENFORCE_SECURE_PROFILE",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:true,false,auto",
+            "field_type": "text"
+        },
+        {
+            "name": "Level Seed",
+            "description": "World seed. Only takes effect on a fresh world. Use auto to leave it alone.",
+            "env_variable": "MC_LEVEL_SEED",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:64",
+            "field_type": "text"
+        },
+        {
+            "name": "Level Type",
+            "description": "World generator, e.g. minecraft:normal, minecraft:flat, minecraft:amplified, or auto.",
+            "env_variable": "MC_LEVEL_TYPE",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:48",
+            "field_type": "text"
+        },
+        {
+            "name": "Auto Update",
+            "description": "Check for a newer build on every start. Only works for plain-jar software; Forge, NeoForge, Fabric and Quilt are skipped because updating them requires regenerating libraries/.",
+            "env_variable": "AUTO_UPDATE",
+            "default_value": "0",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Update Project",
+            "description": "What to update to. \"auto\" derives it from the detected software. Valid: auto, paper, folia, purpur, velocity, waterfall, vanilla.",
+            "env_variable": "UPDATE_PROJECT",
+            "default_value": "auto",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:auto,paper,folia,purpur,velocity,waterfall,vanilla",
+            "field_type": "text"
+        },
+        {
+            "name": "Update Minecraft Version",
+            "description": "Version to track when auto-updating. \"latest\" follows the newest release; pin a version to stay on it and only receive new builds.",
+            "env_variable": "UPDATE_MC_VERSION",
+            "default_value": "latest",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:20",
+            "field_type": "text"
+        },
+        {
+            "name": "Update Channel",
+            "description": "PaperMC build channel: STABLE, RECOMMENDED, BETA or ALPHA. Falls back to the newest build if the channel has none.",
+            "env_variable": "UPDATE_CHANNEL",
+            "default_value": "STABLE",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:STABLE,RECOMMENDED,BETA,ALPHA",
+            "field_type": "text"
+        },
+        {
+            "name": "Pre-flight Validation",
+            "description": "Check before starting that the jar or args file exists, that the EULA is accepted, and that the image's Java version is new enough. Aborts with a readable message instead of a stack trace.",
+            "env_variable": "VALIDATE_STARTUP",
+            "default_value": "1",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Minecraft Version Hint",
+            "description": "Optional. Set this to the Minecraft version (e.g. 1.20.1) so the Java compatibility check works when it cannot be detected automatically.",
+            "env_variable": "MC_VERSION_HINT",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:20",
+            "field_type": "text"
+        }
+    ]
+}

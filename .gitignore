@@ -1,0 +1,10 @@
+# Documentation kept local, not published with the repo.
+README.md
+
+# OS and editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+.vscode/
+.idea/
