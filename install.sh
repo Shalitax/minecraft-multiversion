@@ -7,12 +7,14 @@
 # on disk at boot, so an external installer module can replace the software at
 # any time without touching the egg.
 #
+# Code comments stay in English for maintenance; user-facing output is Spanish.
+#
 set -e
 
 mkdir -p /mnt/server
 cd /mnt/server
 
-UA="pterodactyl-mc-multiversion/1.0 (+https://pterodactyl.io)"
+UA="pterodactyl-mc-multiversion/1.0 (+https://hexservers.com)"
 fetch() { curl -sSL --fail --retry 3 --retry-delay 2 -A "${UA}" "$@"; }
 
 SOFTWARE=$(echo "${SERVER_SOFTWARE:-paper}" | tr '[:upper:]' '[:lower:]')
@@ -23,12 +25,12 @@ JARFILE="${SERVER_JARFILE:-server.jar}"
 echo "=================================================="
 echo " Software : ${SOFTWARE}"
 echo " Version  : ${VERSION}"
-echo " Jar file : ${JARFILE}"
+echo " Archivo  : ${JARFILE}"
 echo "=================================================="
 
 if [ "${SOFTWARE}" = "none" ]; then
-    echo "SERVER_SOFTWARE is 'none'. Skipping download."
-    echo "Use your installer module to place the server files."
+    echo "El software esta configurado como 'none'. No se descargara nada."
+    echo "Usa tu modulo instalador para colocar los archivos del servidor."
     exit 0
 fi
 
@@ -46,11 +48,11 @@ install_paper_family() {
         VERSION=$(fetch "https://fill.papermc.io/v3/projects/${PROJECT}" | jq -r '
             [ .versions | to_entries[] | .value[] ] as $all
             | ( [ $all[] | select(test("-(SNAPSHOT|rc|pre)") | not) ][0] // $all[0] // empty )')
-        echo "Resolved latest ${PROJECT} version: ${VERSION}"
+        echo "Ultima version de ${PROJECT}: ${VERSION}"
     fi
 
     if [ -z "${VERSION}" ]; then
-        echo "ERROR: could not resolve a version for ${PROJECT}." >&2
+        echo "ERROR: no se pudo determinar una version para ${PROJECT}." >&2
         exit 1
     fi
 
@@ -60,11 +62,11 @@ install_paper_family() {
             | if $b == null then empty else $b.downloads["server:default"].url end')
 
     if [ -z "${URL}" ]; then
-        echo "ERROR: no builds found for ${PROJECT} ${VERSION}." >&2
+        echo "ERROR: no se encontraron builds para ${PROJECT} ${VERSION}." >&2
         exit 1
     fi
 
-    echo "Downloading ${URL}"
+    echo "Descargando ${URL}"
     fetch -o "${JARFILE}" "${URL}"
 }
 
@@ -72,10 +74,10 @@ install_paper_family() {
 install_purpur() {
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
         VERSION=$(fetch "https://api.purpurmc.org/v2/purpur" | jq -r '.metadata.current // .versions[-1]')
-        echo "Resolved latest Purpur version: ${VERSION}"
+        echo "Ultima version de Purpur: ${VERSION}"
     fi
 
-    echo "Downloading Purpur ${VERSION}"
+    echo "Descargando Purpur ${VERSION}"
     fetch -o "${JARFILE}" "https://api.purpurmc.org/v2/purpur/${VERSION}/latest/download"
 }
 
@@ -88,16 +90,16 @@ install_vanilla() {
     elif [ "${VERSION}" = "snapshot" ]; then
         VERSION=$(fetch "${MANIFEST}" | jq -r '.latest.snapshot')
     fi
-    echo "Resolved Vanilla version: ${VERSION}"
+    echo "Version de Vanilla: ${VERSION}"
 
     VERSION_URL=$(fetch "${MANIFEST}" | jq -r --arg v "${VERSION}" '.versions[] | select(.id == $v) | .url')
     if [ -z "${VERSION_URL}" ]; then
-        echo "ERROR: Vanilla version ${VERSION} not found." >&2
+        echo "ERROR: no existe la version de Vanilla ${VERSION}." >&2
         exit 1
     fi
 
     DOWNLOAD_URL=$(fetch "${VERSION_URL}" | jq -r '.downloads.server.url')
-    echo "Downloading ${DOWNLOAD_URL}"
+    echo "Descargando ${DOWNLOAD_URL}"
     fetch -o "${JARFILE}" "${DOWNLOAD_URL}"
 }
 
@@ -110,7 +112,7 @@ install_fabric() {
     LOADER=$(fetch "https://meta.fabricmc.net/v2/versions/loader" | jq -r '[.[] | select(.stable == true)][0].version')
     INSTALLER=$(fetch "https://meta.fabricmc.net/v2/versions/installer" | jq -r '[.[] | select(.stable == true)][0].version')
 
-    echo "Fabric: game ${VERSION}, loader ${LOADER}, installer ${INSTALLER}"
+    echo "Fabric: juego ${VERSION}, loader ${LOADER}, instalador ${INSTALLER}"
     fetch -o "${JARFILE}" \
         "https://meta.fabricmc.net/v2/versions/loader/${VERSION}/${LOADER}/${INSTALLER}/server/jar"
 }
@@ -121,14 +123,14 @@ case "${SOFTWARE}" in
     vanilla)                        install_vanilla ;;
     fabric)                         install_fabric ;;
     *)
-        echo "ERROR: unknown SERVER_SOFTWARE '${SOFTWARE}'." >&2
-        echo "Valid values: paper, folia, purpur, vanilla, fabric, velocity, waterfall, none" >&2
+        echo "ERROR: software desconocido '${SOFTWARE}'." >&2
+        echo "Valores validos: paper, folia, purpur, vanilla, fabric, velocity, waterfall, none" >&2
         exit 1
         ;;
 esac
 
 if [ ! -s "${JARFILE}" ]; then
-    echo "ERROR: ${JARFILE} is missing or empty after download." >&2
+    echo "ERROR: ${JARFILE} no existe o quedo vacio tras la descarga." >&2
     exit 1
 fi
 
@@ -138,11 +140,11 @@ case "${SOFTWARE}" in
     *)
         if [ "${EULA}" = "true" ] || [ "${EULA}" = "1" ]; then
             echo "eula=true" > eula.txt
-            echo "EULA accepted."
+            echo "EULA de Minecraft aceptado."
         fi
         [ -f server.properties ] || touch server.properties
         ;;
 esac
 
-echo "Downloaded $(du -h "${JARFILE}" | cut -f1) to ${JARFILE}"
-echo "Install complete."
+echo "Se descargaron $(du -h "${JARFILE}" | cut -f1) en ${JARFILE}"
+echo "Instalacion completada."
