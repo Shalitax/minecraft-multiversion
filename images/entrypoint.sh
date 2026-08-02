@@ -28,21 +28,71 @@ log_warn()  { echo "${C_WARN}[!]${C_RESET} $*"; }
 log_error() { echo "${C_ERR}[x]${C_RESET} $*"; }
 log_ok()    { echo "${C_OK}[+]${C_RESET} $*"; }
 
-# Treat "1", "true", "yes" and "on" as enabled so the egg can use either
-# boolean style without surprising anyone.
+# Accepts the Spanish panel labels as well as the raw boolean styles, so eggs
+# and servers created before the labels existed keep working unchanged.
 is_true() {
-    case "$(echo "${1}" | tr '[:upper:]' '[:lower:]')" in
-        1|true|yes|on|enabled) return 0 ;;
+    case "$(normalize_value "${1}")" in
+        1|true|yes|on|enabled|si|activado|activada) return 0 ;;
         *) return 1 ;;
     esac
 }
 
-# "auto" and empty mean "leave whatever is already in the file alone".
+# Lowercases and strips Spanish accents, so a panel label can be written with
+# or without them and still match. Also means a mojibaked value simply fails to
+# match and is skipped, rather than being written into server.properties.
+# Literal byte-sequence replacements rather than character classes: a class
+# like [Áá] is matched byte by byte outside a UTF-8 locale and silently fails,
+# which is exactly the kind of bug that only shows up in production.
+normalize_value() {
+    echo "${1}" \
+        | sed -e 's/Á/A/g' -e 's/á/a/g' \
+              -e 's/É/E/g' -e 's/é/e/g' \
+              -e 's/Í/I/g' -e 's/í/i/g' \
+              -e 's/Ó/O/g' -e 's/ó/o/g' \
+              -e 's/Ú/U/g' -e 's/ú/u/g' \
+              -e 's/Ü/U/g' -e 's/ü/u/g' \
+              -e 's/Ñ/N/g' -e 's/ñ/n/g' \
+        | tr '[:upper:]' '[:lower:]'
+}
+
+# Empty and the various "leave it alone" labels mean: do not touch the file.
 is_auto() {
     [ -z "${1}" ] && return 0
-    case "$(echo "${1}" | tr '[:upper:]' '[:lower:]')" in
-        auto|default|unset) return 0 ;;
+    case "$(normalize_value "${1}")" in
+        auto|automatico|default|unset|"no modificar"|"sin cambios") return 0 ;;
         *) return 1 ;;
+    esac
+}
+
+# The panel shows friendly Spanish labels, but server.properties only accepts
+# the literal values below. These map one onto the other, accepting the raw
+# English values too so existing servers keep working.
+# An empty result means "not recognised": the caller warns and skips.
+map_bool() {
+    case "$(normalize_value "${1}")" in
+        activado|activada|true|1|si|yes|on|enabled)      echo "true" ;;
+        desactivado|desactivada|false|0|no|off|disabled) echo "false" ;;
+        *)                                               echo "" ;;
+    esac
+}
+
+map_difficulty() {
+    case "$(normalize_value "${1}")" in
+        pacifico|peaceful) echo "peaceful" ;;
+        facil|easy)        echo "easy" ;;
+        normal)            echo "normal" ;;
+        dificil|hard)      echo "hard" ;;
+        *)                 echo "" ;;
+    esac
+}
+
+map_gamemode() {
+    case "$(normalize_value "${1}")" in
+        supervivencia|survival) echo "survival" ;;
+        creativo|creative)      echo "creative" ;;
+        aventura|adventure)     echo "adventure" ;;
+        espectador|spectator)   echo "spectator" ;;
+        *)                      echo "" ;;
     esac
 }
 
@@ -166,36 +216,74 @@ set_prop() {
     log_info "server.properties: ${key}=${val}"
 }
 
+# Typed setters. Each one refuses to write a value it does not understand,
+# because a bad value in server.properties stops the server from booting and
+# the panel label is the only thing most users ever see.
+set_prop_mapped() {
+    local key="$1" raw="$2" mapper="$3" val
+    is_auto "${raw}" && return 0
+
+    val=$(${mapper} "${raw}")
+    if [ -z "${val}" ]; then
+        log_warn "Valor no reconocido para '${key}': '${raw}'. No se modifica server.properties."
+        return 0
+    fi
+    set_prop "${key}" "${val}"
+}
+
+set_prop_num() {
+    local key="$1" raw="$2"
+    is_auto "${raw}" && return 0
+
+    case "${raw}" in
+        ''|*[!0-9]*)
+            log_warn "'${key}' esperaba un numero y recibio '${raw}'. No se modifica server.properties."
+            return 0 ;;
+    esac
+    set_prop "${key}" "${raw}"
+}
+
 apply_properties() {
     [ "${IS_PROXY}" = "1" ] && return 0
 
-    set_prop "online-mode"            "${MC_ONLINE_MODE}"
-    set_prop "difficulty"             "${MC_DIFFICULTY}"
-    set_prop "gamemode"               "${MC_GAMEMODE}"
-    set_prop "pvp"                    "${MC_PVP}"
-    set_prop "hardcore"               "${MC_HARDCORE}"
-    set_prop "max-players"            "${MC_MAX_PLAYERS}"
-    set_prop "view-distance"          "${MC_VIEW_DISTANCE}"
-    set_prop "simulation-distance"    "${MC_SIMULATION_DISTANCE}"
-    set_prop "max-tick-time"          "${MC_MAX_TICK_TIME}"
-    set_prop "motd"                   "${MC_MOTD}"
-    set_prop "white-list"             "${MC_WHITELIST}"
-    set_prop "enforce-secure-profile" "${MC_ENFORCE_SECURE_PROFILE}"
-    set_prop "level-seed"             "${MC_LEVEL_SEED}"
-    set_prop "level-type"             "${MC_LEVEL_TYPE}"
+    set_prop_mapped "online-mode" "${MC_ONLINE_MODE}" map_bool
+    set_prop_mapped "difficulty"  "${MC_DIFFICULTY}"  map_difficulty
+    set_prop_mapped "gamemode"    "${MC_GAMEMODE}"    map_gamemode
+    set_prop_mapped "pvp"         "${MC_PVP}"         map_bool
+    set_prop_mapped "white-list"  "${MC_WHITELIST}"   map_bool
+
+    set_prop_num "max-players"   "${MC_MAX_PLAYERS}"
+    set_prop_num "view-distance" "${MC_VIEW_DISTANCE}"
+
+    # Free text: whatever the user typed goes in as-is.
+    set_prop "motd"       "${MC_MOTD}"
+    set_prop "level-seed" "${MC_LEVEL_SEED}"
+
+    # Not exposed in the egg to keep the panel short, but still honoured if an
+    # admin adds the variable back. Unset means empty, which is_auto skips.
+    set_prop_mapped "hardcore"               "${MC_HARDCORE}"               map_bool
+    set_prop_mapped "enforce-secure-profile" "${MC_ENFORCE_SECURE_PROFILE}" map_bool
+    set_prop_num    "simulation-distance"    "${MC_SIMULATION_DISTANCE}"
+    set_prop        "max-tick-time"          "${MC_MAX_TICK_TIME}"
+    set_prop        "level-type"             "${MC_LEVEL_TYPE}"
 }
 
 # Proxies keep their bind address in their own config file. The panel's
 # server.properties parser cannot reach these, so they are handled here.
 apply_proxy_config() {
+    # Proxy configs are TOML/YAML, so the panel label has to be mapped to a
+    # real boolean here too. Empty means unrecognised, and is skipped.
+    local online=""
+    is_auto "${MC_ONLINE_MODE}" || online=$(map_bool "${MC_ONLINE_MODE}")
+
     case "${SERVER_TYPE}" in
         velocity)
             if [ -f velocity.toml ]; then
                 sed -i -E "s|^\s*bind\s*=.*|bind = \"0.0.0.0:${SERVER_PORT}\"|" velocity.toml
                 log_info "velocity.toml: bind = 0.0.0.0:${SERVER_PORT}"
-                if ! is_auto "${MC_ONLINE_MODE}"; then
-                    sed -i -E "s|^\s*online-mode\s*=.*|online-mode = ${MC_ONLINE_MODE}|" velocity.toml
-                    log_info "velocity.toml: online-mode = ${MC_ONLINE_MODE}"
+                if [ -n "${online}" ]; then
+                    sed -i -E "s|^\s*online-mode\s*=.*|online-mode = ${online}|" velocity.toml
+                    log_info "velocity.toml: online-mode = ${online}"
                 fi
                 if ! is_auto "${MC_MOTD}"; then
                     sed -i -E "s|^\s*motd\s*=.*|motd = \"${MC_MOTD}\"|" velocity.toml
@@ -208,9 +296,9 @@ apply_proxy_config() {
                 sed -i -E "s|^(\s*)host:\s*.*|\1host: 0.0.0.0:${SERVER_PORT}|" config.yml
                 sed -i -E "s|^(\s*)query_port:\s*.*|\1query_port: ${SERVER_PORT}|" config.yml
                 log_info "config.yml: host = 0.0.0.0:${SERVER_PORT}"
-                if ! is_auto "${MC_ONLINE_MODE}"; then
-                    sed -i -E "s|^(\s*)online_mode:\s*.*|\1online_mode: ${MC_ONLINE_MODE}|" config.yml
-                    log_info "config.yml: online_mode = ${MC_ONLINE_MODE}"
+                if [ -n "${online}" ]; then
+                    sed -i -E "s|^(\s*)online_mode:\s*.*|\1online_mode: ${online}|" config.yml
+                    log_info "config.yml: online_mode = ${online}"
                 fi
             fi
             ;;
