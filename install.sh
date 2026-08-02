@@ -245,10 +245,17 @@ echo "${SOFTWARE}" > .multiversion-software
 case "${SOFTWARE}" in
     velocity|waterfall) ;;
     *)
-        if [ "${EULA}" = "true" ] || [ "${EULA}" = "1" ]; then
-            echo "eula=true" > eula.txt
-            echo "EULA de Minecraft aceptado."
-        fi
+        # Unset counts as accepted, matching the entrypoint. Only an explicit
+        # false/0 opts out.
+        case "$(echo "${EULA}" | tr '[:upper:]' '[:lower:]')" in
+            false|0|no|desactivado)
+                echo "Aceptacion automatica del EULA desactivada."
+                ;;
+            *)
+                echo "eula=true" > eula.txt
+                echo "EULA de Minecraft aceptado (https://aka.ms/MinecraftEULA)."
+                ;;
+        esac
         [ -f server.properties ] || touch server.properties
         ;;
 esac

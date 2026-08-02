@@ -316,12 +316,21 @@ apply_proxy_config() {
 }
 
 accept_eula() {
+    # Proxies have no EULA.
     [ "${IS_PROXY}" = "1" ] && return 0
-    if is_true "${EULA}"; then
-        if [ ! -f eula.txt ] || ! grep -q '^eula=true' eula.txt 2>/dev/null; then
-            echo "eula=true" > eula.txt
-            log_ok "Minecraft EULA accepted (eula.txt written)"
-        fi
+
+    # An unset value counts as accepted. Without this, a server whose egg
+    # predates the EULA variable would refuse to boot with an error most
+    # customers cannot interpret, which is the single most common ticket.
+    if [ -n "${EULA}" ] && ! is_true "${EULA}"; then
+        log_warn "La aceptacion automatica del EULA esta desactivada."
+        log_warn "El servidor no arrancara hasta que eula.txt diga eula=true."
+        return 0
+    fi
+
+    if [ ! -f eula.txt ] || ! grep -q '^eula=true' eula.txt 2>/dev/null; then
+        echo "eula=true" > eula.txt
+        log_ok "EULA de Minecraft aceptado automaticamente (https://aka.ms/MinecraftEULA)"
     fi
 }
 
