@@ -4,7 +4,7 @@
         "version": "PTDL_v2",
         "update_url": null
     },
-    "exported_at": "2026-08-02T04:03:29.549Z",
+    "exported_at": "2026-08-02T04:18:44.906Z",
     "name": "Minecraft Multiversión",
     "author": "support@hexservers.com",
     "description": "Un único egg para cualquier servidor de Minecraft Java. Al arrancar, el entrypoint del contenedor detecta si lo instalado es Vanilla, Paper, Purpur, Spigot, Forge, NeoForge, Fabric, Quilt, Velocity, BungeeCord o Waterfall, y arma el comando de inicio adecuado. Como la detección se basa en los archivos presentes, un módulo instalador externo puede cambiar el software cuando quiera sin tocar el egg. Añade opciones en el panel para server.properties (modo online, dificultad, distancia de renderizado y más), ajuste de la JVM, actualización automática opcional y validación previa al arranque. REQUIERE las imágenes Docker propias de este egg.",
@@ -366,6 +366,16 @@
             "user_viewable": true,
             "user_editable": true,
             "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Revisar mods solo de cliente",
+            "description": "Muchos modpacks no arrancan porque traen mods que solo funcionan en el cliente (OptiFine, shaders, minimapas). Esta opción revisa la carpeta mods/ antes de arrancar y los detecta. \"Solo avisar\" los lista en la consola sin tocar nada; \"Mover a una carpeta aparte\" los saca a mods-desactivados/ para que el servidor arranque solo.",
+            "env_variable": "CLIENT_MODS_ACTION",
+            "default_value": "Solo avisar",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:No revisar,Solo avisar,Mover a una carpeta aparte",
             "field_type": "text"
         },
         {

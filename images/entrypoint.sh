@@ -466,6 +466,137 @@ install_geyser() {
 }
 
 # ---------------------------------------------------------------------------
+# Client-only mod detection
+#
+# The usual reason a modpack refuses to start on a server is a client-only mod
+# referencing net.minecraft.client.* classes that simply do not exist in the
+# server jar. No display trick fixes that: the client code is not there.
+#
+# Fabric and Quilt mods declare their side explicitly, so those are detected
+# with certainty. Forge has no standard equivalent field, so known offenders
+# are matched by file name as a fallback.
+# ---------------------------------------------------------------------------
+
+DISABLED_MODS_DIR="mods-desactivados"
+
+# Fallback list for Forge, where the side is not declared. Kept conservative on
+# purpose: only mods that are unambiguously client-side. Anything with a real
+# server component is left out, because a false positive silently removes
+# content the pack needed and is harder to debug than the original crash.
+CLIENT_ONLY_NAMES="optifine optifabric oculus iris rubidium embeddium sodium
+    reeses-sodium sodium-extra indium controllable mousetweaks mouse-tweaks
+    betterf3 better-f3 zoomify litematica replaymod distanthorizons
+    distant-horizons entityculling entity-culling shouldersurfing
+    firstperson first-person notenoughanimations ambientsounds soundphysics
+    sound-physics dynamicsurroundings itemphysic xaeros"
+
+# Extracts one file from a jar, stripping a UTF-8 BOM if present. jq chokes on
+# a BOM, and some mods do ship their metadata with one.
+mod_file() {
+    unzip -p "$1" "$2" 2>/dev/null | sed '1s/^\xEF\xBB\xBF//'
+}
+
+# True when the mod itself declares that it only runs on the client.
+mod_declares_client() {
+    local jar="$1" env
+
+    # Fabric: "environment": "client" | "server" | "*"
+    env=$(mod_file "${jar}" fabric.mod.json | jq -r '.environment // empty' 2>/dev/null)
+    [ "${env}" = "client" ] && return 0
+
+    # Quilt: minecraft.environment, same meaning.
+    env=$(mod_file "${jar}" quilt.mod.json | jq -r '.minecraft.environment // empty' 2>/dev/null)
+    [ "${env}" = "client" ] && return 0
+
+    # Forge/NeoForge only sometimes declare this, and when they do the same
+    # "side" key also appears inside [[dependencies.*]] blocks, where it
+    # describes the dependency and not this mod. Matching those would disable
+    # perfectly good universal mods, so only side declarations outside a
+    # dependencies block count.
+    #
+    # Queried one file at a time: passing both names to unzip makes it fail
+    # outright when one of them is absent, which is the normal case.
+    local toml
+    for toml in META-INF/neoforge.mods.toml META-INF/mods.toml; do
+        if mod_file "${jar}" "${toml}" | awk '
+            /^[[:space:]]*\[\[?dependencies/ { in_deps = 1; next }
+            /^[[:space:]]*\[\[mods\]\]/      { in_deps = 0; next }
+            /^[[:space:]]*\[/                { if ($0 !~ /dependencies/) in_deps = 0 }
+            !in_deps && tolower($0) ~ /^[[:space:]]*side[[:space:]]*=[[:space:]]*"?client"?/ { found = 1 }
+            END { exit !found }
+        '; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+mod_name_is_known_client() {
+    local base pattern
+    base=$(basename "$1" | tr '[:upper:]' '[:lower:]')
+    for pattern in ${CLIENT_ONLY_NAMES}; do
+        case "${base}" in
+            *"${pattern}"*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+scan_client_mods() {
+    local action
+    action=$(normalize_value "${CLIENT_MODS_ACTION:-avisar}")
+    case "${action}" in
+        "no revisar"|ignorar|off|0|no) return 0 ;;
+    esac
+
+    [ -d mods ] || return 0
+    ls mods/*.jar >/dev/null 2>&1 || return 0
+
+    local jar found=0 reason
+    local names=""
+
+    for jar in mods/*.jar; do
+        reason=""
+        if mod_declares_client "${jar}"; then
+            reason="declarado como solo cliente"
+        elif mod_name_is_known_client "${jar}"; then
+            reason="mod conocido de solo cliente"
+        fi
+
+        if [ -n "${reason}" ]; then
+            found=$((found + 1))
+            names="${names}      - $(basename "${jar}") (${reason})
+"
+        fi
+    done
+
+    [ "${found}" -eq 0 ] && return 0
+
+    echo
+    log_warn "Se detectaron ${found} mod(s) que solo funcionan en el cliente:"
+    printf '%s' "${names}"
+    log_warn "Estos mods no existen en la version de servidor y suelen impedir que arranque."
+
+    case "${action}" in
+        mover*|move*)
+            mkdir -p "${DISABLED_MODS_DIR}"
+            for jar in mods/*.jar; do
+                if mod_declares_client "${jar}" || mod_name_is_known_client "${jar}"; then
+                    mv "${jar}" "${DISABLED_MODS_DIR}/" 2>/dev/null \
+                        && log_ok "Movido: $(basename "${jar}")"
+                fi
+            done
+            log_ok "Los mods se movieron a ${DISABLED_MODS_DIR}/. Para recuperarlos, devuelvelos a mods/."
+            ;;
+        *)
+            log_warn "Accion configurada: solo avisar. Borralos o muevelos fuera de mods/ para continuar."
+            ;;
+    esac
+    echo
+}
+
+# ---------------------------------------------------------------------------
 # Startup diagnostics
 # ---------------------------------------------------------------------------
 
@@ -1018,6 +1149,7 @@ apply_properties
 apply_proxy_config
 optimize_configs
 install_geyser
+scan_client_mods
 
 if ! validate; then
     log_error "Las comprobaciones previas fallaron. No se puede arrancar el servidor."
