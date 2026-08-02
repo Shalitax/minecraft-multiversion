@@ -117,14 +117,115 @@ install_fabric() {
         "https://meta.fabricmc.net/v2/versions/loader/${VERSION}/${LOADER}/${INSTALLER}/server/jar"
 }
 
+# --- Leaves ----------------------------------------------------------------
+# Paper fork with an API shaped like PaperMC's own v2.
+install_leaves() {
+    if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
+        VERSION=$(fetch "https://api.leavesmc.org/v2/projects/leaves" | jq -r '.versions[-1]')
+        echo "Ultima version de Leaves: ${VERSION}"
+    fi
+
+    BUILD=$(fetch "https://api.leavesmc.org/v2/projects/leaves/versions/${VERSION}" | jq -r '.builds[-1]')
+    [ -z "${BUILD}" ] || [ "${BUILD}" = "null" ] && { echo "ERROR: no hay builds de Leaves para ${VERSION}." >&2; exit 1; }
+
+    NAME=$(fetch "https://api.leavesmc.org/v2/projects/leaves/versions/${VERSION}/builds/${BUILD}" \
+        | jq -r '.downloads.application.name')
+
+    echo "Descargando Leaves ${VERSION} build ${BUILD}"
+    fetch -o "${JARFILE}" "https://api.leavesmc.org/v2/projects/leaves/versions/${VERSION}/builds/${BUILD}/downloads/${NAME}"
+}
+
+# --- Pufferfish ------------------------------------------------------------
+# Published on Jenkins, one job per Minecraft minor (Pufferfish-1.21, ...).
+install_pufferfish() {
+    if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
+        JOB=$(fetch "https://ci.pufferfish.host/api/json?tree=jobs[name]" \
+            | jq -r '[.jobs[].name | select(test("^Pufferfish-[0-9]"))] | sort_by(split("-")[1] | split(".") | map(tonumber)) | last')
+    else
+        # 1.21.4 lives in the Pufferfish-1.21 job.
+        JOB="Pufferfish-$(echo "${VERSION}" | cut -d. -f1,2)"
+    fi
+    echo "Job de Pufferfish: ${JOB}"
+
+    ART=$(fetch "https://ci.pufferfish.host/job/${JOB}/lastSuccessfulBuild/api/json?tree=artifacts[relativePath]" \
+        | jq -r '.artifacts[0].relativePath')
+    [ -z "${ART}" ] || [ "${ART}" = "null" ] && { echo "ERROR: no se encontro artefacto en ${JOB}." >&2; exit 1; }
+
+    echo "Descargando ${ART}"
+    fetch -o "${JARFILE}" "https://ci.pufferfish.host/job/${JOB}/lastSuccessfulBuild/artifact/${ART}"
+}
+
+# --- Mohist ----------------------------------------------------------------
+# Hybrid: runs Forge mods and Bukkit plugins at the same time.
+mohist_build_url() {
+    fetch "https://mohistmc.com/api/v2/projects/mohist/$1/builds" 2>/dev/null \
+        | jq -r '.builds[-1].originUrl // empty'
+}
+
+install_mohist() {
+    if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
+        # Mohist lists versions that have no builds yet (1.21.4 at time of
+        # writing), so walk backwards until one actually has a download.
+        for CANDIDATE in $(fetch "https://mohistmc.com/api/v2/projects/mohist" | jq -r '.versions | reverse | .[]'); do
+            URL=$(mohist_build_url "${CANDIDATE}")
+            if [ -n "${URL}" ]; then
+                VERSION="${CANDIDATE}"
+                break
+            fi
+            echo "Mohist ${CANDIDATE} aun no tiene builds, probando la anterior..."
+        done
+        echo "Ultima version de Mohist con builds: ${VERSION}"
+    else
+        URL=$(mohist_build_url "${VERSION}")
+    fi
+
+    [ -z "${URL}" ] && { echo "ERROR: no hay builds de Mohist para ${VERSION}." >&2; exit 1; }
+
+    echo "Descargando Mohist ${VERSION}"
+    fetch -o "${JARFILE}" "${URL}"
+}
+
+# --- Arclight --------------------------------------------------------------
+# Also hybrid. Published as GitHub release assets named
+# arclight-<loader>-<mcversion>-<build>.jar, spread across several releases,
+# so the right release has to be searched for by asset name.
+install_arclight() {
+    LOADER=$(echo "${ARCLIGHT_LOADER:-forge}" | tr '[:upper:]' '[:lower:]')
+    API="https://api.github.com/repos/IzzelAliz/Arclight/releases?per_page=100"
+
+    if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
+        URL=$(fetch "${API}" | jq -r --arg l "${LOADER}" \
+            '[.[].assets[] | select(.name | startswith("arclight-" + $l + "-"))][0].browser_download_url // empty')
+    else
+        URL=$(fetch "${API}" | jq -r --arg l "${LOADER}" --arg v "${VERSION}" \
+            '[.[].assets[] | select(.name | startswith("arclight-" + $l + "-" + $v + "-"))][0].browser_download_url // empty')
+    fi
+
+    if [ -z "${URL}" ]; then
+        echo "ERROR: no se encontro Arclight para ${LOADER} ${VERSION}." >&2
+        echo "Versiones disponibles:" >&2
+        fetch "${API}" | jq -r --arg l "${LOADER}" \
+            '[.[].assets[].name | select(startswith("arclight-" + $l + "-"))] | unique | .[]' >&2
+        exit 1
+    fi
+
+    echo "Descargando ${URL}"
+    fetch -o "${JARFILE}" "${URL}"
+}
+
 case "${SOFTWARE}" in
     paper|folia|velocity|waterfall) install_paper_family "${SOFTWARE}" ;;
     purpur)                         install_purpur ;;
     vanilla)                        install_vanilla ;;
     fabric)                         install_fabric ;;
+    leaves)                         install_leaves ;;
+    pufferfish)                     install_pufferfish ;;
+    mohist)                         install_mohist ;;
+    arclight)                       install_arclight ;;
     *)
         echo "ERROR: software desconocido '${SOFTWARE}'." >&2
-        echo "Valores validos: paper, folia, purpur, vanilla, fabric, velocity, waterfall, none" >&2
+        echo "Valores validos: paper, folia, purpur, pufferfish, leaves, vanilla," >&2
+        echo "                 fabric, mohist, arclight, velocity, waterfall, none" >&2
         exit 1
         ;;
 esac
@@ -133,6 +234,12 @@ if [ ! -s "${JARFILE}" ]; then
     echo "ERROR: ${JARFILE} no existe o quedo vacio tras la descarga." >&2
     exit 1
 fi
+
+# Hint for the entrypoint. Mohist and Arclight cannot be told apart from Forge
+# until they have booted once and written their own config files, so record
+# what was installed. Detection based on real files always wins over this, so a
+# later software swap by an external installer module is not misread.
+echo "${SOFTWARE}" > .multiversion-software
 
 # Proxies have no EULA and no server.properties.
 case "${SOFTWARE}" in

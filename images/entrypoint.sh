@@ -161,6 +161,16 @@ detect_server_type() {
         # Waterfall and BungeeCord are indistinguishable on disk and start the
         # same way, so they share a type.
         SERVER_TYPE="bungeecord"
+    elif [ -f "mohist.yml" ] || [ -d "mohist_config" ]; then
+        # Hybrids must be checked before Forge: they ship a Forge library tree,
+        # and launching them from Forge's args file would skip the Bukkit side.
+        SERVER_TYPE="mohist"
+    elif [ -f "arclight.conf" ] || [ -d "arclight" ]; then
+        SERVER_TYPE="arclight"
+    elif [ -f ".multiversion-software" ] && grep -qE '^(mohist|arclight)$' .multiversion-software 2>/dev/null; then
+        # First boot: the hybrid has not written its config files yet, so fall
+        # back to what the installer recorded.
+        SERVER_TYPE=$(cat .multiversion-software)
     elif ARGS_FILE=$(find_args_file "libraries/net/neoforged/neoforge"); then
         SERVER_TYPE="neoforge"
     elif ARGS_FILE=$(find_args_file "libraries/net/minecraftforge/forge"); then
@@ -316,6 +326,193 @@ accept_eula() {
 }
 
 # ---------------------------------------------------------------------------
+# Optimised server configs
+#
+# Applied once, not on every boot: after the first pass the user owns these
+# files. Re-applying would silently undo their tuning every restart.
+# ---------------------------------------------------------------------------
+
+OPTIMIZE_MARKER=".multiversion-optimized"
+# Bump when the preset below changes, so existing servers pick up the new values.
+OPTIMIZE_PRESET_VERSION="1"
+
+# Sets a YAML key only when it already exists. yq would happily create it, but
+# inventing keys in a config the server did not write is how you end up with
+# settings that do nothing and confuse whoever reads the file later.
+yq_set() {
+    local file="$1" path="$2" value="$3" current
+
+    [ -f "${file}" ] || return 1
+    current=$(yq "${path}" "${file}" 2>/dev/null) || return 1
+    [ "${current}" = "null" ] && return 1
+
+    if yq -i "${path} = ${value}" "${file}" 2>/dev/null; then
+        OPTIMIZED_COUNT=$((OPTIMIZED_COUNT + 1))
+        return 0
+    fi
+    log_warn "No se pudo aplicar ${path} en ${file}"
+    return 1
+}
+
+optimize_configs() {
+    is_true "${OPTIMIZE_CONFIGS}" || return 0
+
+    # Only Bukkit-based software has these files. Proxies, and pure Forge,
+    # NeoForge, Fabric or Quilt servers, have nothing to tune here.
+    case "${SERVER_TYPE}" in
+        vanilla|mohist|arclight) ;;
+        *) log_info "Optimizacion de configs: no aplica a '${SERVER_TYPE}', se omite"; return 0 ;;
+    esac
+
+    if [ -f "${OPTIMIZE_MARKER}" ] && [ "$(cat "${OPTIMIZE_MARKER}")" = "${OPTIMIZE_PRESET_VERSION}" ]; then
+        return 0
+    fi
+
+    # These files only exist after the server has booted at least once.
+    if [ ! -f bukkit.yml ] && [ ! -f spigot.yml ]; then
+        log_info "Optimizacion de configs: los archivos aun no existen, se aplicara en el proximo arranque"
+        return 0
+    fi
+
+    OPTIMIZED_COUNT=0
+    log_info "Aplicando configuracion optimizada (una sola vez)..."
+
+    # --- bukkit.yml: fewer mobs alive at once, cheaper autosave -----------
+    yq_set bukkit.yml '.spawn-limits.monsters'       '50'
+    yq_set bukkit.yml '.spawn-limits.animals'        '10'
+    yq_set bukkit.yml '.spawn-limits.water-animals'  '5'
+    yq_set bukkit.yml '.spawn-limits.water-ambient'  '5'
+    yq_set bukkit.yml '.spawn-limits.ambient'        '1'
+    yq_set bukkit.yml '.ticks-per.monster-spawns'    '4'
+    yq_set bukkit.yml '.ticks-per.autosave'          '6000'
+    yq_set bukkit.yml '.chunk-gc.period-in-ticks'    '400'
+
+    # --- spigot.yml: shrink activation ranges, merge dropped items --------
+    yq_set spigot.yml '.world-settings.default.mob-spawn-range'                '6'
+    yq_set spigot.yml '.world-settings.default.entity-activation-range.animals'  '16'
+    yq_set spigot.yml '.world-settings.default.entity-activation-range.monsters' '24'
+    yq_set spigot.yml '.world-settings.default.entity-activation-range.misc'     '8'
+    yq_set spigot.yml '.world-settings.default.merge-radius.item'              '3.5'
+    yq_set spigot.yml '.world-settings.default.merge-radius.exp'               '4.0'
+    yq_set spigot.yml '.world-settings.default.max-entity-collisions'          '2'
+
+    # --- Paper 1.19+ (config/) --------------------------------------------
+    # ALTERNATE_CURRENT is a redstone implementation that is much cheaper and
+    # behaviour-compatible for anything that is not a timing-exact contraption.
+    yq_set config/paper-world-defaults.yml '.chunks.max-auto-save-chunks-per-tick'          '8'
+    yq_set config/paper-world-defaults.yml '.environment.optimize-explosions'               'true'
+    yq_set config/paper-world-defaults.yml '.misc.redstone-implementation'                  '"ALTERNATE_CURRENT"'
+    yq_set config/paper-world-defaults.yml '.entities.spawning.despawn-ranges.monster.soft' '28'
+    yq_set config/paper-world-defaults.yml '.entities.spawning.despawn-ranges.monster.hard' '96'
+    yq_set config/paper-world-defaults.yml '.tick-rates.mob-spawner'                        '2'
+    yq_set config/paper-global.yml         '.misc.region-file-cache-size'                   '256'
+
+    # --- Paper before 1.19 (single paper.yml) ------------------------------
+    yq_set paper.yml '.world-settings.default.max-auto-save-chunks-per-tick' '8'
+    yq_set paper.yml '.world-settings.default.optimize-explosions'           'true'
+
+    echo "${OPTIMIZE_PRESET_VERSION}" > "${OPTIMIZE_MARKER}"
+    log_ok "Configuracion optimizada aplicada: ${OPTIMIZED_COUNT} ajustes"
+    log_info "A partir de ahora estos archivos son tuyos: no se volveran a tocar."
+}
+
+# ---------------------------------------------------------------------------
+# Geyser and Floodgate (Bedrock players)
+# ---------------------------------------------------------------------------
+
+install_geyser() {
+    is_true "${INSTALL_GEYSER}" || return 0
+
+    # Each platform needs its own build of the plugin.
+    local variant plugin_dir fg_variant
+    case "${SERVER_TYPE}" in
+        velocity)             variant="velocity";   fg_variant="velocity"; plugin_dir="plugins" ;;
+        bungeecord|waterfall) variant="bungeecord"; fg_variant="bungee";   plugin_dir="plugins" ;;
+        vanilla|mohist|arclight) variant="spigot";  fg_variant="spigot";   plugin_dir="plugins" ;;
+        *)
+            log_warn "Geyser no es compatible con '${SERVER_TYPE}', se omite"
+            return 0 ;;
+    esac
+
+    mkdir -p "${plugin_dir}"
+    local base="https://download.geysermc.org/v2/projects"
+
+    if [ ! -f "${plugin_dir}/Geyser-${variant}.jar" ] || is_true "${GEYSER_AUTO_UPDATE}"; then
+        log_info "Descargando Geyser (${variant})..."
+        if curl "${CURL_OPTS[@]}" -o "${plugin_dir}/Geyser-${variant}.jar.tmp" \
+            "${base}/geyser/versions/latest/builds/latest/downloads/${variant}"; then
+            mv "${plugin_dir}/Geyser-${variant}.jar.tmp" "${plugin_dir}/Geyser-${variant}.jar"
+            log_ok "Geyser instalado"
+        else
+            rm -f "${plugin_dir}/Geyser-${variant}.jar.tmp"
+            log_error "No se pudo descargar Geyser"
+        fi
+    fi
+
+    if [ ! -f "${plugin_dir}/floodgate-${fg_variant}.jar" ] || is_true "${GEYSER_AUTO_UPDATE}"; then
+        log_info "Descargando Floodgate (${fg_variant})..."
+        if curl "${CURL_OPTS[@]}" -o "${plugin_dir}/floodgate-${fg_variant}.jar.tmp" \
+            "${base}/floodgate/versions/latest/builds/latest/downloads/${fg_variant}"; then
+            mv "${plugin_dir}/floodgate-${fg_variant}.jar.tmp" "${plugin_dir}/floodgate-${fg_variant}.jar"
+            log_ok "Floodgate instalado"
+        else
+            rm -f "${plugin_dir}/floodgate-${fg_variant}.jar.tmp"
+            log_error "No se pudo descargar Floodgate"
+        fi
+    fi
+
+    log_warn "Geyser necesita un puerto UDP propio (por defecto 19132)."
+    log_warn "Asignalo en el nodo y configuralo en plugins/Geyser-Spigot/config.yml"
+}
+
+# ---------------------------------------------------------------------------
+# Startup diagnostics
+# ---------------------------------------------------------------------------
+
+print_diagnostics() {
+    is_true "${SHOW_DIAGNOSTICS}" || return 0
+
+    local plugins=0 mods=0
+    [ -d plugins ] && plugins=$(ls -1 plugins/*.jar 2>/dev/null | wc -l)
+    [ -d mods ] && mods=$(ls -1 mods/*.jar 2>/dev/null | wc -l)
+
+    echo
+    echo "${C_INFO}--- Resumen del servidor ---${C_RESET}"
+    printf '  Software    : %s\n' "${SERVER_TYPE}"
+    printf '  Java        : %s (version %s)\n' "${JAVA_RAW}" "${JAVA_MAJOR}"
+    printf '  Memoria     : %s MB asignados\n' "${SERVER_MEMORY}"
+    [ "${plugins}" -gt 0 ] && printf '  Plugins     : %s\n' "${plugins}"
+    [ "${mods}" -gt 0 ] && printf '  Mods        : %s\n' "${mods}"
+
+    local vd=""
+    [ -f server.properties ] && vd=$(grep -E '^view-distance=' server.properties 2>/dev/null | cut -d= -f2)
+    [ -n "${vd}" ] && printf '  Distancia   : %s chunks\n' "${vd}"
+
+    # --- Memory warnings ---------------------------------------------------
+    # Thresholds are deliberately loose: the goal is to catch the obviously
+    # broken setups that generate support tickets, not to be precise.
+    if [ "${SERVER_MEMORY}" -lt 1024 ]; then
+        log_warn "Menos de 1 GB de RAM. Minecraft moderno necesita 2 GB o mas para funcionar bien."
+    fi
+    if [ "${mods}" -gt 50 ] && [ "${SERVER_MEMORY}" -lt 4096 ]; then
+        log_warn "${mods} mods con solo ${SERVER_MEMORY} MB. Un modpack de este tamano suele necesitar 4-6 GB."
+    fi
+    if [ -n "${vd}" ] && [ "${vd}" -gt 12 ] 2>/dev/null && [ "${SERVER_MEMORY}" -lt 4096 ]; then
+        log_warn "Distancia de renderizado ${vd} con ${SERVER_MEMORY} MB. Bajarla a 8 mejoraria bastante el rendimiento."
+    fi
+
+    # The JVM cannot grow past the container limit, so an Xmx at 100% of the
+    # allocation leaves nothing for the JVM's own non-heap memory and gets the
+    # container OOM-killed rather than throwing a Java error.
+    if ! is_true "${LOWER_XMX}" && [ "${SERVER_MEMORY}" -ge 4096 ]; then
+        log_info "Con esta memoria, activar 'Reservar memoria para el sistema' suele evitar cierres inesperados."
+    fi
+
+    echo "${C_INFO}----------------------------${C_RESET}"
+    echo
+}
+
+# ---------------------------------------------------------------------------
 # Auto-update
 #
 # Scope note: only plain-jar software is updated. Forge, NeoForge, Fabric and
@@ -416,6 +613,79 @@ update_purpur() {
     fi
 }
 
+update_leaves() {
+    local version="$1"
+
+    if is_auto "${version}" || [ "${version}" = "latest" ]; then
+        version=$(curl "${CURL_OPTS[@]}" "https://api.leavesmc.org/v2/projects/leaves" 2>/dev/null | jq -r '.versions[-1] // empty')
+        [ -z "${version}" ] && { log_warn "No se pudo determinar la ultima version de Leaves, se omite"; return 1; }
+    fi
+
+    local build
+    build=$(curl "${CURL_OPTS[@]}" "https://api.leavesmc.org/v2/projects/leaves/versions/${version}" 2>/dev/null | jq -r '.builds[-1] // empty')
+    [ -z "${build}" ] && { log_warn "No hay builds de Leaves para ${version}, se omite"; return 1; }
+
+    local marker="leaves-${version}-${build}"
+    if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "${marker}" ] && [ -f "${SERVER_JARFILE}" ]; then
+        log_ok "Leaves ${version} build ${build} ya esta actualizado"
+        return 0
+    fi
+
+    local name
+    name=$(curl "${CURL_OPTS[@]}" "https://api.leavesmc.org/v2/projects/leaves/versions/${version}/builds/${build}" 2>/dev/null \
+        | jq -r '.downloads.application.name // empty')
+    [ -z "${name}" ] && { log_warn "No se pudo resolver la descarga de Leaves, se omite"; return 1; }
+
+    log_info "Descargando Leaves ${version} build ${build}"
+    if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" \
+        "https://api.leavesmc.org/v2/projects/leaves/versions/${version}/builds/${build}/downloads/${name}"; then
+        mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
+        echo "${marker}" > "${STATE_FILE}"
+        log_ok "Actualizado a Leaves ${version} build ${build}"
+    else
+        rm -f "${SERVER_JARFILE}.tmp"
+        log_error "Fallo la descarga, se mantiene el jar actual"
+        return 1
+    fi
+}
+
+# Pufferfish publishes on Jenkins, one job per Minecraft minor.
+update_pufferfish() {
+    local version="$1" job
+
+    if is_auto "${version}" || [ "${version}" = "latest" ]; then
+        job=$(curl "${CURL_OPTS[@]}" "https://ci.pufferfish.host/api/json?tree=jobs[name]" 2>/dev/null \
+            | jq -r '[.jobs[].name | select(test("^Pufferfish-[0-9]"))] | sort_by(split("-")[1] | split(".") | map(tonumber)) | last // empty')
+    else
+        job="Pufferfish-$(echo "${version}" | cut -d. -f1,2)"
+    fi
+    [ -z "${job}" ] && { log_warn "No se pudo determinar el job de Pufferfish, se omite"; return 1; }
+
+    local info build art
+    info=$(curl "${CURL_OPTS[@]}" "https://ci.pufferfish.host/job/${job}/lastSuccessfulBuild/api/json?tree=number,artifacts[relativePath]" 2>/dev/null)
+    build=$(echo "${info}" | jq -r '.number // empty')
+    art=$(echo "${info}" | jq -r '.artifacts[0].relativePath // empty')
+    [ -z "${art}" ] && { log_warn "No se encontro artefacto en ${job}, se omite"; return 1; }
+
+    local marker="pufferfish-${job}-${build}"
+    if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "${marker}" ] && [ -f "${SERVER_JARFILE}" ]; then
+        log_ok "Pufferfish ${job} build ${build} ya esta actualizado"
+        return 0
+    fi
+
+    log_info "Descargando Pufferfish ${job} build ${build}"
+    if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" \
+        "https://ci.pufferfish.host/job/${job}/lastSuccessfulBuild/artifact/${art}"; then
+        mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
+        echo "${marker}" > "${STATE_FILE}"
+        log_ok "Actualizado a Pufferfish ${job} build ${build}"
+    else
+        rm -f "${SERVER_JARFILE}.tmp"
+        log_error "Fallo la descarga, se mantiene el jar actual"
+        return 1
+    fi
+}
+
 update_vanilla() {
     local version="$1"
     local manifest="https://launchermeta.mojang.com/mc/game/version_manifest.json"
@@ -459,30 +729,44 @@ run_auto_update() {
 
     local project="${UPDATE_PROJECT}"
     if is_auto "${project}"; then
-        # Map the detected type onto an updatable project where one exists.
-        case "${SERVER_TYPE}" in
-            velocity)   project="velocity" ;;
-            bungeecord) project="waterfall" ;;
-            vanilla)    project="paper" ;;
-            *)          project="" ;;
-        esac
+        # Purpur, Leaves and Pufferfish are all plain jars and all detect as
+        # "vanilla", so guessing the project from the detected type would
+        # quietly replace the customer's server software with Paper. What the
+        # installer recorded is the only reliable source here.
+        if [ -f .multiversion-software ]; then
+            project=$(cat .multiversion-software)
+        else
+            case "${SERVER_TYPE}" in
+                velocity)   project="velocity" ;;
+                bungeecord) project="waterfall" ;;
+                *)          project="" ;;
+            esac
+        fi
     fi
 
-    if [ -z "${project}" ]; then
-        log_warn "Auto-update is on but '${SERVER_TYPE}' has no safe update path. Reinstall from the panel to change versions."
+    if [ -z "${project}" ] || [ "${project}" = "none" ]; then
+        log_warn "La actualizacion automatica esta activada pero no se pudo determinar que software actualizar."
+        log_warn "Elige uno en 'Que actualizar', o reinstala desde el panel para cambiar de version."
         return 0
     fi
 
-    log_info "Auto-update: checking ${project}"
+    log_info "Actualizacion automatica: comprobando ${project}"
     case "${project}" in
         paper|folia|velocity|waterfall)
             update_paper_family "${project}" "${UPDATE_MC_VERSION}" "${UPDATE_CHANNEL:-STABLE}" ;;
         purpur)
             update_purpur "${UPDATE_MC_VERSION}" ;;
+        leaves)
+            update_leaves "${UPDATE_MC_VERSION}" ;;
+        pufferfish)
+            update_pufferfish "${UPDATE_MC_VERSION}" ;;
         vanilla)
             update_vanilla "${UPDATE_MC_VERSION}" ;;
+        mohist|arclight|fabric|quilt|forge|neoforge)
+            log_warn "'${project}' no se puede actualizar solo: hay que regenerar sus librerias."
+            log_warn "Reinstala desde el panel para cambiar de version." ;;
         *)
-            log_warn "Unknown update project '${project}', skipping" ;;
+            log_warn "Proyecto de actualizacion desconocido: '${project}'. Se omite." ;;
     esac
 }
 
@@ -732,11 +1016,15 @@ fi
 accept_eula
 apply_properties
 apply_proxy_config
+optimize_configs
+install_geyser
 
 if ! validate; then
-    log_error "Pre-flight validation failed. Aborting startup."
+    log_error "Las comprobaciones previas fallaron. No se puede arrancar el servidor."
     exit 1
 fi
+
+print_diagnostics
 
 STARTUP_MODE=$(echo "${STARTUP_MODE:-auto}" | tr '[:upper:]' '[:lower:]')
 
