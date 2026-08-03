@@ -276,14 +276,6 @@ apply_properties() {
     set_prop "motd"       "${MC_MOTD}"
     set_prop "level-name" "${MC_LEVEL_NAME}"
     set_prop "level-seed" "${MC_LEVEL_SEED}"
-
-    # Not exposed in the egg to keep the panel short, but still honoured if an
-    # admin adds the variable back. Unset means empty, which is_auto skips.
-    set_prop_mapped "hardcore"               "${MC_HARDCORE}"               map_bool
-    set_prop_mapped "enforce-secure-profile" "${MC_ENFORCE_SECURE_PROFILE}" map_bool
-    set_prop_num    "simulation-distance"    "${MC_SIMULATION_DISTANCE}"
-    set_prop        "max-tick-time"          "${MC_MAX_TICK_TIME}"
-    set_prop        "level-type"             "${MC_LEVEL_TYPE}"
 }
 
 # Proxies keep their bind address in their own config file. The panel's
@@ -387,7 +379,7 @@ optimize_configs() {
 
     # These files only exist after the server has booted at least once.
     if [ ! -f bukkit.yml ] && [ ! -f spigot.yml ]; then
-        log_info "Optimizacion de configs: los archivos aun no existen, se aplicara en el proximo arranque"
+        log_info "Configuracion optimizada: los archivos aun no existen, se aplicara en el proximo arranque"
         return 0
     fi
 
@@ -632,20 +624,9 @@ print_diagnostics() {
     [ "${plugins}" -gt 0 ] && printf '  Plugins     : %s\n' "${plugins}"
     [ "${mods}" -gt 0 ] && printf '  Mods        : %s\n' "${mods}"
 
-    local free_mb
-    free_mb=$(df -Pm /home/container 2>/dev/null | awk 'NR==2 {print $4}')
-    [ -n "${free_mb}" ] && printf '  Disco libre : %s MB
-' "${free_mb}"
-
     local vd=""
     [ -f server.properties ] && vd=$(grep -E '^view-distance=' server.properties 2>/dev/null | cut -d= -f2)
     [ -n "${vd}" ] && printf '  Distancia   : %s chunks\n' "${vd}"
-
-    # Running out of disk mid-save corrupts chunks, so this is worth flagging
-    # before it happens rather than after.
-    if [ -n "${free_mb}" ] && [ "${free_mb}" -lt 512 ] 2>/dev/null; then
-        log_warn "Solo quedan ${free_mb} MB libres. El servidor puede fallar al guardar el mundo."
-    fi
 
     # --- Memory warnings ---------------------------------------------------
     # Thresholds are deliberately loose: the goal is to catch the obviously

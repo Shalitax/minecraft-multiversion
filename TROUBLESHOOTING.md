@@ -143,14 +143,6 @@ grande necesita 4–6 GB.
 **Respuesta:** bajar **Distancia de renderizado** a 6 u 8. Es la mejora de
 rendimiento más efectiva que existe y no requiere subir de plan.
 
-### `[!] Solo quedan X MB libres. El servidor puede fallar al guardar el mundo.`
-
-Quedarse sin disco a mitad de guardado **corrompe chunks**. Hay que actuar antes,
-no después.
-
-**Respuesta:** que borre backups viejos o mundos que no use. Si el plan está al
-límite, ampliar.
-
 ### `[i] Con esta memoria, activar 'Reservar memoria para el sistema' suele evitar cierres inesperados.`
 
 Aparece con asignaciones de 4 GB o más. Si el servidor se cierra solo sin dejar
