@@ -114,13 +114,34 @@ jobs:
               if (seen.has(v.env_variable)) fail(`variable duplicada: ${v.env_variable}`);
               seen.add(v.env_variable);
               if (!v.rules) fail(`${v.env_variable} no tiene rules`);
+              const parts = String(v.rules).split("|");
+
               // A default that its own in: rule rejects makes every server fail
               // validation on the first save, before anyone changes anything.
-              const inRule = String(v.rules).split("|").find((r) => r.startsWith("in:"));
+              const inRule = parts.find((r) => r.startsWith("in:"));
               if (inRule) {
                 const allowed = inRule.slice(3).split(",");
                 if (!allowed.includes(String(v.default_value))) {
                   fail(`${v.env_variable}: default "${v.default_value}" no esta en su regla in:`);
+                }
+              }
+
+              // Pterodactyl stores rules as one pipe-delimited string and hands
+              // it to Laravel, which splits on "|" before parsing. A regex
+              // containing "|" is therefore torn in half and silently stops
+              // validating what it was written to validate.
+              const rawRegex = String(v.rules).match(/regex:(.*)$/);
+              if (rawRegex && parts.filter((r) => r.startsWith("regex:")).length) {
+                const regexPart = parts.find((r) => r.startsWith("regex:")).slice(6);
+                if (!regexPart.endsWith("/") || regexPart.length < 2) {
+                  fail(`${v.env_variable}: la regla regex: parece cortada ("${regexPart}"). ` +
+                       `Laravel separa por "|", asi que el patron no puede contener "|".`);
+                } else {
+                  // Same check the panel will run, against the declared default.
+                  const body = regexPart.slice(1, -1);
+                  if (!new RegExp(body).test(String(v.default_value))) {
+                    fail(`${v.env_variable}: default "${v.default_value}" no pasa su propia regex`);
+                  }
                 }
               }
             }
@@ -149,20 +170,10 @@ jobs:
           - { tag: '8',    platforms: 'linux/amd64,linux/arm64' }
           - { tag: '8j9',  platforms: 'linux/amd64' }
           - { tag: '11',   platforms: 'linux/amd64,linux/arm64' }
-          - { tag: '11j9', platforms: 'linux/amd64' }
           - { tag: '16',   platforms: 'linux/amd64,linux/arm64' }
-          - { tag: '16j9', platforms: 'linux/amd64' }
           - { tag: '17',   platforms: 'linux/amd64,linux/arm64' }
           - { tag: '17j9', platforms: 'linux/amd64' }
-          - { tag: '18',   platforms: 'linux/amd64,linux/arm64' }
-          - { tag: '18j9', platforms: 'linux/amd64' }
-          - { tag: '19',   platforms: 'linux/amd64,linux/arm64' }
-          - { tag: '19j9', platforms: 'linux/amd64' }
-          - { tag: '20',   platforms: 'linux/amd64,linux/arm64' }
           - { tag: '21',   platforms: 'linux/amd64,linux/arm64' }
-          - { tag: '22',   platforms: 'linux/amd64,linux/arm64' }
-          - { tag: '23',   platforms: 'linux/amd64,linux/arm64' }
-          - { tag: '24',   platforms: 'linux/amd64,linux/arm64' }
           - { tag: '25',   platforms: 'linux/amd64,linux/arm64' }
 
     steps:
@@ -238,7 +249,7 @@ jobs:
           {
             echo "## Images published"
             echo
-            echo 'Package: `${{ needs.prepare.outputs.image }}` (18 tags on one package)'
+            echo 'Package: `${{ needs.prepare.outputs.image }}` (8 tags on one package)'
             echo
             echo '> If this package is new, set it to **Public** once:'
             echo '> Profile → Packages → minecraft-multiversion → Package settings → Change visibility.'
@@ -250,7 +261,7 @@ jobs:
             # Newest first: Pterodactyl preselects the first image in this list
             # when a server is created, and the egg defaults install the newest
             # Minecraft, which needs the newest Java.
-            for t in 25 24 23 22 21 20 19 19j9 18 18j9 17 17j9 16 16j9 11 11j9 8 8j9; do
+            for t in 25 21 17 17j9 16 11 8 8j9; do
               case "$t" in
                 *j9) label="Java ${t%j9} (OpenJ9)" ;;
                 *)   label="Java $t" ;;

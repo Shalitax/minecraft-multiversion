@@ -100,6 +100,7 @@ verify_sha() {
 
     case "${ALGO}" in
         sha1) ACTUAL=$(sha1sum "${FILE}" 2>/dev/null | awk '{print $1}') ;;
+        md5)  ACTUAL=$(md5sum "${FILE}" 2>/dev/null | awk '{print $1}') ;;
         *)    ACTUAL=$(sha256sum "${FILE}" 2>/dev/null | awk '{print $1}') ;;
     esac
 
@@ -117,25 +118,44 @@ verify_sha() {
     echo "Integridad de la descarga verificada (${ALGO})."
 }
 
-# Minimum Java feature version needed to RUN the modloader installer. Not the
-# same question as what the finished server needs: the installer is an ordinary
-# Java program, and running it on a newer JVM than its target is usually fine
-# while running it on an older one never is.
+# Java feature version needed to run a project's installer. For Forge, NeoForge
+# and Quilt this is looser than what the finished server needs, since their
+# installer is an ordinary Java program and runs fine on a newer JVM. For Spigot
+# it is strict: BuildTools actually compiles the server, so the JDK has to be at
+# least what that Minecraft version targets.
 installer_java_for() {
     case "$1" in
-        latest|"")           echo 21 ;;
+        # "latest" resolves to whatever is newest, so assume the newest
+        # requirement. ensure_java falls back downwards if it is unavailable.
+        latest|"")           echo 25 ;;
         1.8*|1.9*|1.1[0-6]*) echo 8 ;;
         1.17*)               echo 17 ;;
+        1.18*|1.19*)         echo 17 ;;
+        1.20|1.20.[0-4]*)    echo 17 ;;
+        1.20*|1.21*)         echo 21 ;;
+        2[0-5].*)            echo 21 ;;
+        26.*|2[7-9].*)       echo 25 ;;
         *)                   echo 21 ;;
     esac
 }
 
-# Forge, NeoForge and Quilt ship an installer that has to be executed, and the
-# Pterodactyl installer image has no JVM at all. Only those three pay this cost;
-# every other software is a plain download.
+# Forge, NeoForge, Quilt and Spigot all ship an installer that has to be
+# executed, and the Pterodactyl installer image has no JVM at all. Only those
+# four pay this cost; every other software is a plain download.
+#
+#   ensure_java <feature version> [jre|jdk]
+#
+# BuildTools compiles source, so it needs a JDK; the rest only need a runtime.
 ensure_java() {
-    if command -v java >/dev/null 2>&1; then
-        return 0
+    NEED="$1"
+    KIND="${2:-jre}"
+
+    # A JRE already present does not satisfy a JDK request, so check for the
+    # compiler rather than just the launcher when one is asked for.
+    if [ "${KIND}" = "jdk" ]; then
+        command -v javac >/dev/null 2>&1 && return 0
+    else
+        command -v java >/dev/null 2>&1 && return 0
     fi
 
     if ! command -v apk >/dev/null 2>&1; then
@@ -144,15 +164,25 @@ ensure_java() {
         exit 1
     fi
 
-    # Newest first from the version requested: a fallback upwards works far more
-    # often than downwards, and Alpine does not carry every JDK on every release.
-    case "$1" in
-        8)     CANDIDATES="openjdk8-jre openjdk11-jre-headless openjdk17-jre-headless" ;;
-        16|17) CANDIDATES="openjdk17-jre-headless openjdk21-jre-headless openjdk11-jre-headless" ;;
-        *)     CANDIDATES="openjdk21-jre-headless openjdk17-jre-headless openjdk25-jre-headless" ;;
-    esac
+    # Requested version first, then downwards. Alpine does not carry every JDK
+    # on every release, and an installer usually tolerates a nearby version.
+    if [ "${KIND}" = "jdk" ]; then
+        case "${NEED}" in
+            8)     CANDIDATES="openjdk8 openjdk11-jdk openjdk17-jdk" ;;
+            16|17) CANDIDATES="openjdk17-jdk openjdk21-jdk openjdk11-jdk" ;;
+            21)    CANDIDATES="openjdk21-jdk openjdk17-jdk openjdk25-jdk" ;;
+            *)     CANDIDATES="openjdk25-jdk openjdk21-jdk openjdk17-jdk" ;;
+        esac
+    else
+        case "${NEED}" in
+            8)     CANDIDATES="openjdk8-jre openjdk11-jre-headless openjdk17-jre-headless" ;;
+            16|17) CANDIDATES="openjdk17-jre-headless openjdk21-jre-headless openjdk11-jre-headless" ;;
+            21)    CANDIDATES="openjdk21-jre-headless openjdk17-jre-headless openjdk25-jre-headless" ;;
+            *)     CANDIDATES="openjdk25-jre-headless openjdk21-jre-headless openjdk17-jre-headless" ;;
+        esac
+    fi
 
-    echo "Instalando temporalmente Java para ejecutar el instalador de ${SOFTWARE}..."
+    echo "Instalando temporalmente Java (${KIND}) para el instalador de ${SOFTWARE}..."
     for PKG in ${CANDIDATES}; do
         if apk add --no-cache "${PKG}" >/dev/null 2>&1; then
             echo "Java disponible: $(java -version 2>&1 | head -1)"
@@ -160,7 +190,7 @@ ensure_java() {
         fi
     done
 
-    echo "ERROR: no se pudo instalar ningun Java para ejecutar el instalador." >&2
+    echo "ERROR: no se pudo instalar ningun Java (${KIND}) para el instalador." >&2
     echo "Probados: ${CANDIDATES}" >&2
     exit 1
 }
@@ -251,8 +281,74 @@ install_purpur() {
     BUILD=$(fetch_meta "https://api.purpurmc.org/v2/purpur/${VERSION}" 2>/dev/null | jq -r '.builds.latest // empty')
     require_data "${BUILD}" "Purpur no publica builds para la version ${VERSION}."
 
+    # Purpur publishes md5 rather than a sha.
+    SHA=$(fetch_meta "https://api.purpurmc.org/v2/purpur/${VERSION}/${BUILD}" 2>/dev/null | jq -r '.md5 // empty')
+
     echo "Descargando Purpur ${VERSION} build ${BUILD}"
     fetch -o "${JARFILE}" "https://api.purpurmc.org/v2/purpur/${VERSION}/${BUILD}/download"
+    verify_sha "${JARFILE}" "${SHA}" md5
+}
+
+# --- Spigot ----------------------------------------------------------------
+# The only software here with no published binary: Spigot cannot be
+# redistributed, so BuildTools has to compile it from source on the spot.
+# That makes it by far the slowest and most fragile path in this script.
+install_spigot() {
+    # BuildTools compiles, so it needs a full JDK, not just a runtime, and git
+    # to clone the upstream repositories.
+    ensure_java "$(installer_java_for "${VERSION}")" jdk
+
+    if ! command -v git >/dev/null 2>&1; then
+        echo "ERROR: BuildTools necesita git y este contenedor no lo tiene." >&2
+        exit 1
+    fi
+    # BuildTools aborts on a repository it considers dirty unless identity is set.
+    git config --global --add safe.directory '*' 2>/dev/null || true
+    git config --global user.email "installer@localhost" 2>/dev/null || true
+    git config --global user.name "Pterodactyl Installer" 2>/dev/null || true
+
+    REV="${VERSION}"
+    [ -z "${REV}" ] && REV="latest"
+
+    echo "=================================================="
+    echo " Compilando Spigot ${REV} con BuildTools."
+    echo " Esto tarda entre 10 y 20 minutos y necesita ~2 GB"
+    echo " de RAM. No reinstales a mitad del proceso."
+    echo "=================================================="
+
+    # Built in its own directory: BuildTools leaves several gigabytes of clones
+    # and Maven artifacts behind, and dropping those straight into the server
+    # folder would eat the customer's disk quota for nothing.
+    BUILD_DIR="/mnt/server/.buildtools"
+    rm -rf "${BUILD_DIR}"
+    mkdir -p "${BUILD_DIR}"
+    cd "${BUILD_DIR}"
+
+    fetch -o BuildTools.jar \
+        "https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar"
+
+    if ! java -jar BuildTools.jar --rev "${REV}" --compile spigot; then
+        cd /mnt/server
+        rm -rf "${BUILD_DIR}"
+        echo "ERROR: BuildTools no pudo compilar Spigot ${REV}." >&2
+        echo "Causas habituales: version inexistente, poca RAM en el nodo, o" >&2
+        echo "que la version pedida necesite otra version de Java." >&2
+        exit 1
+    fi
+
+    # BuildTools names the result spigot-<version>.jar.
+    RESULT=$(find . -maxdepth 1 -name 'spigot-*.jar' | head -1)
+    if [ -z "${RESULT}" ]; then
+        cd /mnt/server
+        rm -rf "${BUILD_DIR}"
+        echo "ERROR: BuildTools termino pero no dejo ningun spigot-*.jar." >&2
+        exit 1
+    fi
+
+    mv "${RESULT}" "/mnt/server/${JARFILE}"
+    cd /mnt/server
+    rm -rf "${BUILD_DIR}"
+    echo "Spigot compilado correctamente."
 }
 
 # --- Vanilla ---------------------------------------------------------------
@@ -315,11 +411,15 @@ install_quilt() {
         require_data "${VERSION}" "no se pudo determinar la ultima version de Minecraft para Quilt."
     fi
 
-    IURL=$(fetch_meta "https://meta.quiltmc.org/v3/versions/installer" | jq -r '.[0].url // empty')
+    # One request, both fields: the URL and the hash that validates it.
+    IMETA=$(fetch_meta "https://meta.quiltmc.org/v3/versions/installer")
+    IURL=$(echo "${IMETA}" | jq -r '.[0].url // empty')
+    ISHA=$(echo "${IMETA}" | jq -r '.[0].hashes.sha1 // empty')
     require_data "${IURL}" "no se pudo determinar el instalador de Quilt."
 
     echo "Descargando el instalador de Quilt"
     fetch -o quilt-installer.jar "${IURL}"
+    verify_sha quilt-installer.jar "${ISHA}" sha1
 
     echo "Instalando Quilt para Minecraft ${VERSION}. Esto puede tardar varios minutos."
     if ! java -jar quilt-installer.jar install server "${VERSION}" --download-server --install-dir=.; then
@@ -453,28 +553,6 @@ install_bungeecord() {
     fetch -o "${JARFILE}" "https://ci.md-5.net/job/BungeeCord/lastSuccessfulBuild/artifact/bootstrap/target/BungeeCord.jar"
 }
 
-# --- Leaves ----------------------------------------------------------------
-# Paper fork with an API shaped like PaperMC's own v2.
-install_leaves() {
-    if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
-        VERSION=$(fetch_meta "https://api.leavesmc.org/v2/projects/leaves" | jq -r '.versions[-1] // empty')
-        require_data "${VERSION}" "no se pudo determinar la ultima version de Leaves."
-        echo "Ultima version de Leaves: ${VERSION}"
-    fi
-
-    BUILD=$(fetch_meta "https://api.leavesmc.org/v2/projects/leaves/versions/${VERSION}" | jq -r '.builds[-1] // empty')
-    require_data "${BUILD}" "no hay builds de Leaves para ${VERSION}."
-
-    META=$(fetch_meta "https://api.leavesmc.org/v2/projects/leaves/versions/${VERSION}/builds/${BUILD}")
-    NAME=$(echo "${META}" | jq -r '.downloads.application.name // empty')
-    SHA=$(echo "${META}" | jq -r '.downloads.application.sha256 // empty')
-    require_data "${NAME}" "no se pudo resolver la descarga de Leaves ${VERSION}."
-
-    echo "Descargando Leaves ${VERSION} build ${BUILD}"
-    fetch -o "${JARFILE}" "https://api.leavesmc.org/v2/projects/leaves/versions/${VERSION}/builds/${BUILD}/downloads/${NAME}"
-    verify_sha "${JARFILE}" "${SHA}" sha256
-}
-
 # --- Pufferfish ------------------------------------------------------------
 # Published on Jenkins, one job per Minecraft minor (Pufferfish-1.21, ...).
 install_pufferfish() {
@@ -504,9 +582,11 @@ install_pufferfish() {
 
 # --- Mohist ----------------------------------------------------------------
 # Hybrid: runs Forge mods and Bukkit plugins at the same time.
+# Prints "<url> <sha256>" for the newest build of a Minecraft version.
 mohist_build_url() {
     fetch_meta "https://mohistmc.com/api/v2/projects/mohist/$1/builds" 2>/dev/null \
-        | jq -r '.builds[-1].originUrl // empty'
+        | jq -r '.builds[-1] // empty | if . == null or . == "" then empty
+                 else "\(.originUrl) \(.fileSha256 // "")" end'
 }
 
 install_mohist() {
@@ -517,8 +597,8 @@ install_mohist() {
         require_data "${VERSIONS}" "no se pudo consultar las versiones de Mohist."
 
         for CANDIDATE in ${VERSIONS}; do
-            URL=$(mohist_build_url "${CANDIDATE}")
-            if [ -n "${URL}" ]; then
+            RESULT=$(mohist_build_url "${CANDIDATE}")
+            if [ -n "${RESULT}" ]; then
                 VERSION="${CANDIDATE}"
                 break
             fi
@@ -526,16 +606,20 @@ install_mohist() {
         done
         echo "Ultima version de Mohist con builds: ${VERSION}"
     else
-        URL=$(mohist_build_url "${VERSION}")
+        RESULT=$(mohist_build_url "${VERSION}")
     fi
 
-    if [ -z "${URL}" ]; then
+    if [ -z "${RESULT}" ]; then
         echo "ERROR: no hay builds de Mohist para ${VERSION}." >&2
         exit 1
     fi
 
+    URL=$(echo "${RESULT}" | cut -d' ' -f1)
+    SHA=$(echo "${RESULT}" | cut -d' ' -f2)
+
     echo "Descargando Mohist ${VERSION}"
     fetch -o "${JARFILE}" "${URL}"
+    verify_sha "${JARFILE}" "${SHA}" sha256
 }
 
 # --- Arclight --------------------------------------------------------------
@@ -557,13 +641,22 @@ install_arclight() {
         exit 1
     fi
 
+    # GitHub publishes an asset digest as "sha256:<hex>", so the prefix is
+    # stripped here and the bare hash handed to verify_sha.
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
-        URL=$(echo "${RELEASES}" | jq -r --arg l "${LOADER}" \
-            '[.[].assets[] | select(.name | startswith("arclight-" + $l + "-"))][0].browser_download_url // empty')
+        RESULT=$(echo "${RELEASES}" | jq -r --arg l "${LOADER}" \
+            '[.[].assets[] | select(.name | startswith("arclight-" + $l + "-"))][0]
+             | if . == null then empty
+               else "\(.browser_download_url) \((.digest // "") | sub("^sha256:";""))" end')
     else
-        URL=$(echo "${RELEASES}" | jq -r --arg l "${LOADER}" --arg v "${VERSION}" \
-            '[.[].assets[] | select(.name | startswith("arclight-" + $l + "-" + $v + "-"))][0].browser_download_url // empty')
+        RESULT=$(echo "${RELEASES}" | jq -r --arg l "${LOADER}" --arg v "${VERSION}" \
+            '[.[].assets[] | select(.name | startswith("arclight-" + $l + "-" + $v + "-"))][0]
+             | if . == null then empty
+               else "\(.browser_download_url) \((.digest // "") | sub("^sha256:";""))" end')
     fi
+
+    URL=$(echo "${RESULT}" | cut -d' ' -f1)
+    SHA=$(echo "${RESULT}" | cut -d' ' -f2)
 
     if [ -z "${URL}" ]; then
         echo "ERROR: no se encontro Arclight para ${LOADER} ${VERSION}." >&2
@@ -575,24 +668,25 @@ install_arclight() {
 
     echo "Descargando ${URL}"
     fetch -o "${JARFILE}" "${URL}"
+    verify_sha "${JARFILE}" "${SHA}" sha256
 }
 
 case "${SOFTWARE}" in
     paper|folia|velocity|waterfall) install_paper_family "${SOFTWARE}" ;;
     purpur)                         install_purpur ;;
+    spigot)                         install_spigot ;;
     vanilla)                        install_vanilla ;;
     fabric)                         install_fabric ;;
     quilt)                          install_quilt ;;
     forge)                          install_forge ;;
     neoforge)                       install_neoforge ;;
     bungeecord)                     install_bungeecord ;;
-    leaves)                         install_leaves ;;
     pufferfish)                     install_pufferfish ;;
     mohist)                         install_mohist ;;
     arclight)                       install_arclight ;;
     *)
         echo "ERROR: software desconocido '${SOFTWARE}'." >&2
-        echo "Valores validos: paper, folia, purpur, pufferfish, leaves, vanilla," >&2
+        echo "Valores validos: paper, folia, purpur, pufferfish, spigot, vanilla," >&2
         echo "                 fabric, quilt, forge, neoforge, mohist, arclight," >&2
         echo "                 velocity, waterfall, bungeecord, none" >&2
         exit 1

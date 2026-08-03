@@ -21,7 +21,11 @@ REGISTRY="${REGISTRY:-ghcr.io/shalitax/minecraft-multiversion}"
 PUSH="${PUSH:-0}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 
-ALL_TAGS=(8 8j9 11 11j9 16 16j9 17 17j9 18 18j9 19 19j9 20 21 22 23 24 25)
+# Only the Java versions some Minecraft release actually needs, plus OpenJ9 for
+# the two that matter on low-RAM plans. 18, 19, 20, 22, 23 and 24 were dropped
+# because nothing in Minecraft requires them: 17, 21 and 25 already cover their
+# ranges, and each extra tag is a full multi-arch build on every push.
+ALL_TAGS=(8 8j9 11 16 17 17j9 21 25)
 
 # The IBM Semeru base images have no arm64 build, so those tags stay amd64-only.
 amd64_only() {

@@ -124,6 +124,31 @@ sí existen.
 > NeoForge solo existe desde Minecraft 1.20.2. Para versiones anteriores hay que
 > usar `forge`.
 
+### Spigot: `Compilando Spigot X con BuildTools.`
+
+Spigot no se puede redistribuir, así que **hay que compilarlo en el momento**.
+Es la instalación más lenta y frágil del egg: 10-20 minutos y ~2 GB de RAM.
+
+Durante ese rato la consola de instalación parece parada mientras clona los
+repositorios de upstream. Es normal.
+
+**Respuesta:** esperar. Si el cliente tiene prisa o el nodo va justo de RAM,
+**Paper es preferible**: es compatible con todos los plugins de Spigot, rinde
+mejor y se instala en segundos.
+
+### `ERROR: BuildTools no pudo compilar Spigot X.`
+
+Causas por orden de frecuencia:
+
+1. La versión pedida no existe (`--rev` inválido)
+2. El nodo se quedó sin RAM a mitad de la compilación
+3. Esa versión de Minecraft necesita otro JDK del que se instaló
+
+Los archivos temporales se borran solos, así que el servidor queda vacío y se
+puede reinstalar sin limpiar nada a mano.
+
+**Respuesta:** reintentar; si vuelve a fallar, ofrecer Paper.
+
 ### `ERROR: no se pudo consultar las versiones de Arclight en GitHub.`
 
 GitHub limita a **60 consultas por hora y por IP**, y esa IP la comparte todo el
@@ -142,7 +167,7 @@ Alpine.
 
 ### `La API del proyecto no respondio.`
 
-El proyecto elegido (Leaves, Mohist, Purpur...) tiene su API caída. La
+El proyecto elegido (Mohist, Purpur, Pufferfish...) tiene su API caída. La
 instalación se detiene con un mensaje claro en vez de dejar un servidor a medias.
 
 **Respuesta:** reintentar más tarde, o instalar otro software. Paper y Vanilla
@@ -162,10 +187,14 @@ rápida:
 | Minecraft | Java |
 |---|---|
 | 1.16 y anteriores | 8 |
-| 1.17 | 16 |
+| 1.17 | 16 (17 también sirve) |
 | 1.18 – 1.20.4 | 17 |
 | 1.20.5 – 1.21.x | 21 |
 | 26.x en adelante | **25** |
+
+El egg ofrece exactamente esas versiones (8, 11, 16, 17, 21, 25) más OpenJ9 de 8
+y 17 para planes con poca RAM. No hay 18, 19, 20, 22, 23 ni 24 porque ninguna
+versión de Minecraft las necesita: 17, 21 y 25 cubren todo su rango.
 
 Forge anterior a 1.17 **necesita Java 8**; con versiones más nuevas falla de
 formas poco claras.

@@ -629,6 +629,11 @@ scan_client_mods() {
 
     local jar found=0 reason
     local names=""
+    # Paths of the offending jars, one per line. Reading a mod's metadata costs
+    # up to four unzip calls, so the result of this pass is kept instead of
+    # being recomputed to move the files: on a 200-mod pack that is the
+    # difference between ~800 and ~1600 unzip invocations.
+    local offenders=""
 
     for jar in mods/*.jar; do
         reason=""
@@ -640,6 +645,8 @@ scan_client_mods() {
 
         if [ -n "${reason}" ]; then
             found=$((found + 1))
+            offenders="${offenders}${jar}
+"
             names="${names}      - $(basename "${jar}") (${reason})
 "
         fi
@@ -655,12 +662,13 @@ scan_client_mods() {
     case "${action}" in
         mover*|move*)
             mkdir -p "${DISABLED_MODS_DIR}"
-            for jar in mods/*.jar; do
-                if mod_declares_client "${jar}" || mod_name_is_known_client "${jar}"; then
-                    mv "${jar}" "${DISABLED_MODS_DIR}/" 2>/dev/null \
-                        && log_ok "Movido: $(basename "${jar}")"
-                fi
-            done
+            # read -r without IFS trimming, so a mod whose file name has spaces
+            # still moves instead of being silently skipped.
+            while IFS= read -r jar; do
+                [ -n "${jar}" ] || continue
+                mv "${jar}" "${DISABLED_MODS_DIR}/" 2>/dev/null \
+                    && log_ok "Movido: $(basename "${jar}")"
+            done <<< "${offenders}"
             log_ok "Los mods se movieron a ${DISABLED_MODS_DIR}/. Para recuperarlos, devuelvelos a mods/."
             ;;
         *)
@@ -747,6 +755,7 @@ verify_checksum() {
 
     case "${algo}" in
         sha1) actual=$(sha1sum "${file}" 2>/dev/null | awk '{print $1}') ;;
+        md5)  actual=$(md5sum "${file}" 2>/dev/null | awk '{print $1}') ;;
         *)    actual=$(sha256sum "${file}" 2>/dev/null | awk '{print $1}') ;;
     esac
 
@@ -846,56 +855,22 @@ update_purpur() {
         return 0
     fi
 
+    # Purpur publishes md5 rather than a sha.
+    local sha
+    sha=$(curl "${CURL_META[@]}" "https://api.purpurmc.org/v2/purpur/${version}/${build}" 2>/dev/null | jq -r '.md5 // empty')
+
     log_info "Descargando Purpur ${version} build ${build}"
     if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" "https://api.purpurmc.org/v2/purpur/${version}/${build}/download"; then
+        if ! verify_checksum "${SERVER_JARFILE}.tmp" "${sha}" md5; then
+            rm -f "${SERVER_JARFILE}.tmp"
+            return 1
+        fi
         mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
         echo "${marker}" > "${STATE_FILE}"
         log_ok "Actualizado a Purpur ${version} build ${build}"
     else
         rm -f "${SERVER_JARFILE}.tmp"
         log_error "Fallo la descarga, se mantiene la version actual"
-        return 1
-    fi
-}
-
-update_leaves() {
-    local version="$1"
-
-    if is_auto "${version}" || [ "${version}" = "latest" ]; then
-        version=$(curl "${CURL_META[@]}" "https://api.leavesmc.org/v2/projects/leaves" 2>/dev/null | jq -r '.versions[-1] // empty')
-        [ -z "${version}" ] && { log_warn "No se pudo determinar la ultima version de Leaves, se omite"; return 1; }
-    fi
-
-    local build
-    build=$(curl "${CURL_META[@]}" "https://api.leavesmc.org/v2/projects/leaves/versions/${version}" 2>/dev/null | jq -r '.builds[-1] // empty')
-    [ -z "${build}" ] && { log_warn "No hay builds de Leaves para ${version}, se omite"; return 1; }
-
-    local marker="leaves-${version}-${build}"
-    if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "${marker}" ] && [ -f "${SERVER_JARFILE}" ]; then
-        log_ok "Leaves ${version} build ${build} ya esta actualizado"
-        return 0
-    fi
-
-    # One request, both fields: the name for the URL and the hash to verify it.
-    local meta name sha
-    meta=$(curl "${CURL_META[@]}" "https://api.leavesmc.org/v2/projects/leaves/versions/${version}/builds/${build}" 2>/dev/null)
-    name=$(echo "${meta}" | jq -r '.downloads.application.name // empty')
-    sha=$(echo "${meta}" | jq -r '.downloads.application.sha256 // empty')
-    [ -z "${name}" ] && { log_warn "No se pudo resolver la descarga de Leaves, se omite"; return 1; }
-
-    log_info "Descargando Leaves ${version} build ${build}"
-    if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" \
-        "https://api.leavesmc.org/v2/projects/leaves/versions/${version}/builds/${build}/downloads/${name}"; then
-        if ! verify_checksum "${SERVER_JARFILE}.tmp" "${sha}" sha256; then
-            rm -f "${SERVER_JARFILE}.tmp"
-            return 1
-        fi
-        mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
-        echo "${marker}" > "${STATE_FILE}"
-        log_ok "Actualizado a Leaves ${version} build ${build}"
-    else
-        rm -f "${SERVER_JARFILE}.tmp"
-        log_error "Fallo la descarga, se mantiene el jar actual"
         return 1
     fi
 }
@@ -1025,7 +1000,6 @@ detect_fork_name() {
     case "${current}" in
         *purpur*)     echo "purpur" ;;
         *pufferfish*) echo "pufferfish" ;;
-        *leaves*)     echo "leaves" ;;
         *folia*)      echo "folia" ;;
         *paper*)      echo "paper" ;;
         *)            return 1 ;;
@@ -1035,8 +1009,8 @@ detect_fork_name() {
 marker_matches_type() {
     local fork
     case "$1" in
-        # Every Paper fork is a plain jar and detects as "vanilla".
-        paper|purpur|pufferfish|leaves|folia|vanilla)
+        # Every Paper fork, plus Spigot, is a plain jar and detects as "vanilla".
+        paper|purpur|pufferfish|folia|spigot|vanilla)
             [ "${SERVER_TYPE}" = "vanilla" ] || return 1
             # Same family, but possibly a different fork than the one recorded.
             if fork=$(detect_fork_name); then
@@ -1062,7 +1036,7 @@ run_auto_update() {
 
     local project="${UPDATE_PROJECT}" marker=""
     if is_auto "${project}"; then
-        # Purpur, Leaves and Pufferfish are all plain jars and all detect as
+        # Purpur, Pufferfish and Spigot are all plain jars and all detect as
         # "vanilla", so guessing the project from the detected type would
         # quietly replace the customer's server software with Paper. What the
         # installer recorded is the only reliable source here.
@@ -1100,14 +1074,15 @@ run_auto_update() {
             update_paper_family "${project}" "${UPDATE_MC_VERSION}" "${UPDATE_CHANNEL:-STABLE}" ;;
         purpur)
             update_purpur "${UPDATE_MC_VERSION}" ;;
-        leaves)
-            update_leaves "${UPDATE_MC_VERSION}" ;;
         pufferfish)
             update_pufferfish "${UPDATE_MC_VERSION}" ;;
         vanilla)
             update_vanilla "${UPDATE_MC_VERSION}" ;;
         bungeecord)
             update_bungeecord ;;
+        spigot)
+            log_warn "Spigot no se puede actualizar solo: hay que recompilarlo con BuildTools."
+            log_warn "Reinstala desde el panel para cambiar de version." ;;
         mohist|arclight|fabric|quilt|forge|neoforge)
             log_warn "'${project}' no se puede actualizar solo: hay que regenerar sus librerias."
             log_warn "Reinstala desde el panel para cambiar de version." ;;
