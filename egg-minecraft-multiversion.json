@@ -1,5 +1,4 @@
 {
-    "_comment": "Egg Minecraft Multiversión de HexServers. La lógica de arranque vive en el entrypoint de la imagen, no aquí.",
     "meta": {
         "version": "PTDL_v2",
         "update_url": null
@@ -45,9 +44,9 @@
     "variables": [
         {
             "name": "Software del servidor",
-            "description": "Software que se descarga al instalar o reinstalar. Paper y sus forks: paper, purpur, pufferfish, leaf, gale, folia, spigot. Vanilla y modloaders: vanilla, forge, neoforge, fabric, quilt. Plataforma de plugins alternativa: sponge (NO admite plugins de Spigot/Paper). Hibridos mods+plugins: mohist, arclight. Proxies: velocity, bungeecord, waterfall (waterfall ya no recibe versiones nuevas, usa velocity en instalaciones nuevas). Servidor limbo para redes: nanolimbo. Usa \"none\" si un modulo instalador externo coloca los archivos. Forge, NeoForge y Quilt tardan varios minutos porque hay que ejecutar su instalador; SPIGOT tarda entre 10 y 20 minutos porque se compila desde el codigo fuente con BuildTools.",
+            "description": "Software que se descarga al instalar o reinstalar. Debe reinstalar el servidor si se configura manualmente una version desde esta pestaña. Si usa el instalador de versiones del panel se recomienda dejarlo como \"none\". ",
             "env_variable": "SERVER_SOFTWARE",
-            "default_value": "paper",
+            "default_value": "none",
             "user_viewable": true,
             "user_editable": true,
             "rules": "required|string|in:paper,purpur,pufferfish,leaf,gale,folia,spigot,vanilla,sponge,forge,neoforge,fabric,quilt,mohist,arclight,velocity,bungeecord,waterfall,nanolimbo,none",
@@ -88,8 +87,8 @@
             "description": "\"auto\" arma el comando de inicio a partir del software detectado y de las opciones de abajo (recomendado). \"manual\" ejecuta el Comando de inicio tal cual está escrito arriba, solo añadiéndole las flags.",
             "env_variable": "STARTUP_MODE",
             "default_value": "auto",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "required|string|in:auto,manual",
             "field_type": "text"
         },
@@ -108,8 +107,8 @@
             "description": "Flags extra para la JVM, separadas por espacios. Déjalo vacío si no sabes qué poner. Ejemplo: -Dfile.encoding=UTF-8",
             "env_variable": "EXTRA_JAVA_ARGS",
             "default_value": "",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "nullable|string|max:512",
             "field_type": "text"
         },
@@ -124,8 +123,8 @@
             "field_type": "text"
         },
         {
-            "name": "Optimizaciones de Aikar",
-            "description": "1 activado, 0 desactivado. Juego de optimizaciones de memoria muy recomendado en Paper, Purpur y Spigot. Déjalo en 1 salvo que sepas lo que haces. En Velocity se aplican automáticamente sus propias optimizaciones.",
+            "name": "Habilitar Aikar Flags",
+            "description": "Optimizaciones de memoria muy recomendado en Paper, Purpur y Spigot.",
             "env_variable": "AIKAR_FLAGS",
             "default_value": "1",
             "user_viewable": true,
@@ -134,18 +133,18 @@
             "field_type": "text"
         },
         {
-            "name": "Recolector de memoria",
+            "name": "GC (Aikar Flags)",
             "description": "Solo se usa si las Optimizaciones de Aikar están desactivadas. Déjalo en \"Automático\" salvo que sepas lo que haces. ZGC necesita Java 15 o superior; zgc-gen necesita Java 21 o superior.",
             "env_variable": "GC_TYPE",
             "default_value": "Automático",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "required|string|in:Automático,g1,zgc,zgc-gen,shenandoah",
             "field_type": "text"
         },
         {
             "name": "Reservar memoria para el sistema",
-            "description": "1 activado, 0 desactivado. Deja parte de la memoria libre para uso interno de Java en lugar de asignarla toda al juego. Actívalo si tu servidor se apaga solo por falta de memoria, algo habitual en modpacks grandes.",
+            "description": "Deja parte de la memoria libre para uso interno de Java en lugar de asignarla toda al juego. Actívalo si tu servidor se apaga solo por falta de memoria, algo habitual en modpacks grandes.",
             "env_variable": "LOWER_XMX",
             "default_value": "0",
             "user_viewable": true,
@@ -164,8 +163,8 @@
             "field_type": "text"
         },
         {
-            "name": "Operaciones SIMD",
-            "description": "1 activado, 0 desactivado. Acelera algunos cálculos en Pufferfish y Purpur. Necesita Java 16 o superior; en versiones anteriores se ignora sin dar error.",
+            "name": "Habilitar SIMD",
+            "description": "Acelera algunos cálculos en Pufferfish y Purpur. Necesita Java 16 o superior; en versiones anteriores se ignora sin dar error.",
             "env_variable": "SIMD_OPERATIONS",
             "default_value": "0",
             "user_viewable": true,
@@ -175,11 +174,11 @@
         },
         {
             "name": "Protección Log4j2",
-            "description": "1 activado, 0 desactivado. Protección contra una vulnerabilidad antigua de Minecraft. Solo hace falta en versiones sin actualizar; lo recomendable es actualizar el servidor.",
+            "description": "Protección contra una vulnerabilidad antigua de Minecraft. Solo hace falta en versiones sin actualizar; lo recomendable es actualizar el servidor.",
             "env_variable": "LOG4J2_VULN_WORKAROUND",
             "default_value": "0",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "required|boolean",
             "field_type": "text"
         },
@@ -187,7 +186,7 @@
             "name": "Modo online (premium)",
             "description": "Activado: solo entran cuentas originales de Minecraft compradas en Mojang. Desactivado: entra cualquiera, incluidas cuentas no originales. \"No modificar\" deja el valor que ya tenga el archivo server.properties.",
             "env_variable": "MC_ONLINE_MODE",
-            "default_value": "Activado",
+            "default_value": "No modificar",
             "user_viewable": true,
             "user_editable": true,
             "rules": "required|string|in:Activado,Desactivado,No modificar",
@@ -284,8 +283,8 @@
             "field_type": "text"
         },
         {
-            "name": "Actualización automática",
-            "description": "1 activado, 0 desactivado. Busca una versión más reciente cada vez que arranca el servidor. Solo funciona con Paper, Purpur, Pufferfish, Leaf, Gale, Folia, Velocity, BungeeCord, Waterfall y Vanilla. Forge, NeoForge, Fabric, Quilt, Mohist y Arclight se omiten porque actualizarlos obliga a regenerar sus librerías, y Spigot porque hay que recompilarlo: para esos, reinstala desde el panel. Nota sobre Gale: se distribuye por GitHub, que limita las consultas por IP, así que en nodos con muchos servidores puede saltarse la comprobación algún arranque (el servidor arranca igual).",
+            "name": "Actualizar build al iniciar",
+            "description": "Busca una versión más reciente cada vez que arranca el servidor. Solo funciona con Paper, Purpur, Pufferfish, Leaf, Gale, Folia, Velocity, BungeeCord, Waterfall y Vanilla.",
             "env_variable": "AUTO_UPDATE",
             "default_value": "0",
             "user_viewable": true,
@@ -298,8 +297,8 @@
             "description": "Con \"Automático\" se usa el software que se instaló, para no reemplazarlo por otro sin querer. Cámbialo solo si quieres forzar uno distinto.",
             "env_variable": "UPDATE_PROJECT",
             "default_value": "Automático",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "required|string|in:Automático,paper,purpur,pufferfish,leaf,gale,folia,velocity,bungeecord,waterfall,vanilla",
             "field_type": "text"
         },
@@ -335,9 +334,9 @@
         },
         {
             "name": "Optimizar configuración del servidor",
-            "description": "1 activado, 0 desactivado. Aplica valores optimizados a bukkit.yml, spigot.yml y las configs de Paper: menos mobs simultáneos, rangos de actividad más cortos y redstone más barata. Se aplica UNA SOLA VEZ y después esos archivos quedan bajo control del cliente. Solo afecta a Paper y derivados, y a los híbridos.",
+            "description": "Aplica valores optimizados a los archivos de configuración del servidor. Esto puede ayudar a reducir el lag y mejorar el rendimiento. Solo tiene efecto en Paper, Purpur, Pufferfish, Leaf, Gale y Folia. No se aplica a Spigot ni a Forge.",
             "env_variable": "OPTIMIZE_CONFIGS",
-            "default_value": "1",
+            "default_value": "0",
             "user_viewable": true,
             "user_editable": true,
             "rules": "required|boolean",
@@ -345,31 +344,31 @@
         },
         {
             "name": "Resumen al arrancar",
-            "description": "1 activado, 0 desactivado. Muestra en la consola un resumen con el software detectado, la versión de Java, la memoria y el número de plugins o mods, además de avisos cuando la configuración es claramente insuficiente.",
+            "description": "Muestra en la consola un resumen con el software detectado, la versión de Java, la memoria y el número de plugins o mods, además de avisos cuando la configuración es claramente insuficiente.",
             "env_variable": "SHOW_DIAGNOSTICS",
             "default_value": "1",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "required|boolean",
             "field_type": "text"
         },
         {
             "name": "Log de inicio en un solo bloque",
-            "description": "1 activado, 0 desactivado. Junta todos los mensajes del arranque y los muestra de una sola vez, justo antes de que arranque el servidor. Sin esto los mensajes salen poco a poco y el propio servidor los tapa con sus miles de líneas antes de que dé tiempo a leerlos. Ponlo en 0 solo si necesitas ver el progreso en tiempo real para diagnosticar un arranque lento.",
+            "description": "Junta todos los mensajes del arranque y los muestra de una sola vez, justo antes de que arranque el servidor. Sin esto los mensajes salen poco a poco y el propio servidor los tapa con sus miles de líneas antes de que dé tiempo a leerlos. Ponlo en 0 solo si necesitas ver el progreso en tiempo real para diagnosticar un arranque lento.",
             "env_variable": "STARTUP_SUMMARY",
             "default_value": "1",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "required|boolean",
             "field_type": "text"
         },
         {
             "name": "Limpiar la consola al arrancar",
-            "description": "1 activado, 0 desactivado. Borra la consola justo antes de mostrar el resumen, para que quede solo y bien visible. ATENCIÓN: también borra lo que hubiera de un arranque anterior, así que si un servidor se cierra solo conviene copiar el error ANTES de reiniciar. Solo tiene efecto si la opción anterior está activada.",
+            "description": " Borra la consola justo antes de mostrar el resumen, para que quede solo y bien visible. ATENCIÓN: también borra lo que hubiera de un arranque anterior, así que si un servidor se cierra solo conviene copiar el error ANTES de reiniciar. Solo tiene efecto si la opción anterior está activada.",
             "env_variable": "CONSOLE_CLEAR",
             "default_value": "1",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "required|boolean",
             "field_type": "text"
         },
@@ -377,15 +376,15 @@
             "name": "Segundos de espera antes de arrancar",
             "description": "Tiempo que se mantiene el resumen en pantalla antes de iniciar el servidor, para que dé tiempo a leerlo. 0 lo desactiva y el máximo es 30. Ten en cuenta que estos segundos se suman a CADA reinicio del servidor.",
             "env_variable": "STARTUP_PAUSE",
-            "default_value": "5",
-            "user_viewable": true,
-            "user_editable": true,
+            "default_value": "8",
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "required|integer|between:0,30",
             "field_type": "text"
         },
         {
             "name": "Instalar Geyser y Floodgate",
-            "description": "1 activado, 0 desactivado. Permite que entren jugadores de Minecraft Bedrock (móvil y consola). Descarga la versión correcta del plugin según el software detectado. IMPORTANTE: requiere asignar un puerto UDP adicional al servidor, normalmente el 19132.",
+            "description": "Permite que entren jugadores de Minecraft Bedrock (móvil y consola). Descarga la versión correcta del plugin según el software detectado. IMPORTANTE: requiere asignar un puerto UDP adicional al servidor, normalmente el 19132.",
             "env_variable": "INSTALL_GEYSER",
             "default_value": "0",
             "user_viewable": true,
@@ -395,7 +394,7 @@
         },
         {
             "name": "Actualizar Geyser al arrancar",
-            "description": "1 activado, 0 desactivado. Vuelve a descargar Geyser y Floodgate en cada arranque. Útil porque Geyser deja de funcionar cuando Mojang publica una versión nueva de Bedrock.",
+            "description": "Actualiza automaticamente geyser al iniciar el servidor. Útil porque Geyser deja de funcionar cuando Mojang publica una versión nueva de Bedrock.",
             "env_variable": "GEYSER_AUTO_UPDATE",
             "default_value": "0",
             "user_viewable": true,
@@ -418,28 +417,28 @@
             "description": "Acepta automáticamente el EULA de Minecraft (https://aka.ms/MinecraftEULA) escribiendo eula.txt, para que el servidor arranque sin que el cliente tenga que hacer nada. Si lo pones en 0, el servidor no arrancará hasta que el cliente lo acepte a mano.",
             "env_variable": "EULA",
             "default_value": "1",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "required|boolean",
             "field_type": "text"
         },
         {
             "name": "Borrar todo al reinstalar",
-            "description": "1 activado, 0 desactivado. Al pulsar \"Reinstalar\", borra TODOS los archivos del servidor (mundos, plugins y configuraciones incluidos) y deja una instalación limpia. Al crear el servidor no tiene efecto, porque la carpeta ya está vacía. Ponlo en 0 si prefieres que reinstalar solo reemplace el .jar y conserve el resto.",
+            "description": "Al pulsar \"Reinstalar\", borra TODOS los archivos del servidor (mundos, plugins y configuraciones incluidos) y deja una instalación limpia. Al crear el servidor no tiene efecto, porque la carpeta ya está vacía. Ponlo en 0 si prefieres que reinstalar solo reemplace el .jar y conserve el resto.",
             "env_variable": "WIPE_ON_INSTALL",
             "default_value": "1",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "required|boolean",
             "field_type": "text"
         },
         {
             "name": "Comprobaciones al arrancar",
-            "description": "1 activado, 0 desactivado. Antes de iniciar, comprueba que los archivos del servidor existen, que el EULA está aceptado y que la versión de Java es compatible. Si algo falla, muestra un mensaje claro en español en vez de un error de Java. Se recomienda dejarlo en 1.",
+            "description": "Antes de iniciar, comprueba que los archivos del servidor existen, que el EULA está aceptado y que la versión de Java es compatible. Si algo falla, muestra un mensaje claro en español en vez de un error de Java.",
             "env_variable": "VALIDATE_STARTUP",
             "default_value": "1",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "required|boolean",
             "field_type": "text"
         },
@@ -448,8 +447,8 @@
             "description": "Opcional. Indica la versión de Minecraft (por ejemplo 1.20.1) para que la comprobación de compatibilidad con Java funcione cuando no se pueda detectar sola. Déjalo vacío si no lo necesitas.",
             "env_variable": "MC_VERSION_HINT",
             "default_value": "",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "nullable|string|max:20",
             "field_type": "text"
         }
