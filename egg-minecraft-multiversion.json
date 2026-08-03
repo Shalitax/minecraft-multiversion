@@ -384,12 +384,22 @@
         },
         {
             "name": "Instalar Geyser y Floodgate",
-            "description": "Permite que entren jugadores de Minecraft Bedrock (móvil y consola). Descarga la versión correcta del plugin según el software detectado. IMPORTANTE: requiere asignar un puerto UDP adicional al servidor, normalmente el 19132.",
+            "description": "Permite que entren jugadores de Minecraft Bedrock (móvil y consola). Descarga la versión correcta del plugin según el software detectado y lo deja configurado en el puerto indicado abajo. IMPORTANTE: ese puerto UDP tiene que estar asignado al servidor en el nodo, o Geyser no podrá abrirlo. No funciona en Vanilla puro, Sponge ni NanoLimbo, porque no cargan plugins de Bukkit.",
             "env_variable": "INSTALL_GEYSER",
             "default_value": "0",
             "user_viewable": true,
             "user_editable": true,
             "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Puerto de Geyser (Bedrock)",
+            "description": "Puerto UDP por el que entran los jugadores de Bedrock. Es el que tienen que escribir en su lista de servidores. Debe coincidir con una asignación UDP real del servidor en el nodo: si no coincide, Geyser no podrá abrirlo. Se aplica en cada arranque, así que basta con cambiarlo y reiniciar. Por defecto 19132, el puerto estándar de Bedrock.",
+            "env_variable": "GEYSER_PORT",
+            "default_value": "19132",
+            "user_viewable": true,
+            "user_editable": false,
+            "rules": "required|integer|between:1,65535",
             "field_type": "text"
         },
         {

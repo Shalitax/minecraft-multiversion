@@ -31,7 +31,7 @@ Las dos primeras líneas del bloque identifican el entorno:
 
 ```
 [i] Java 21.0.5 (version 21) | Zona horaria UTC | IP 172.18.0.5
-[i] Egg Multiversion v1.2.0 | imagen 2026-08-03 01:34 UTC (20260803-a1b2c3d)
+[i] Egg Multiversion v1.3.0 | imagen 2026-08-03 01:34 UTC (20260803-a1b2c3d)
 ```
 
 > **Antes de reiniciar un servidor que falló, copia el error.** La limpieza de
@@ -360,12 +360,32 @@ límites de spawn. Puede editar `bukkit.yml` a mano y no se le sobrescribirá.
 
 ## Bedrock (Geyser)
 
-### `[!] Geyser necesita un puerto UDP propio (por defecto 19132).`
+### `[+] Geyser escuchara en el puerto UDP N` / `[+] Geyser configurado en el puerto UDP N`
 
-Sale siempre que Geyser está activado, como recordatorio.
+El egg escribe el puerto de **Puerto de Geyser (Bedrock)** en la config de
+Geyser en cada arranque, así que cambiarlo en el panel y reiniciar es
+suficiente: nadie tiene que editar YAML.
 
-**Si los jugadores de Bedrock no conectan** aunque el plugin cargue, es esto
-casi seguro: falta asignar el puerto UDP al servidor desde el nodo.
+- *"escuchara en"* → ya existía la config y se le ha actualizado el puerto.
+- *"configurado en"* → primer arranque, no existía; se ha creado una config
+  mínima y Geyser rellena el resto al cargar.
+
+**Si los jugadores de Bedrock no conectan** aunque el plugin cargue, el motivo
+casi seguro es que **ese puerto UDP no está asignado al servidor en el nodo**.
+La variable solo le dice a Geyser qué puerto abrir; si el nodo no lo tiene
+reservado para este servidor, no hay nada que abrir.
+
+**Respuesta:** comprobar en el nodo que existe una asignación **UDP** con ese
+número para este servidor. El puerto es el que el cliente escribe en su lista
+de servidores de Bedrock.
+
+### `[!] 'Puerto de Geyser' esperaba un numero y recibio 'X'`
+
+Llegó un valor no numérico. **No se toca la config**, Geyser se queda con el
+puerto que ya tuviera.
+
+**Respuesta:** revisar qué está escribiendo el sistema de billing en esa
+variable.
 
 ### `[!] Geyser no funciona en 'vanilla': ese software no carga plugins de Bukkit`
 

@@ -15,7 +15,7 @@ cd /home/container || exit 1
 # Bumped by hand when this file changes in a way worth telling apart in a
 # support ticket. MV_BUILD_* are baked in by the Dockerfile at build time, so
 # a cached image can be identified even when the tag has not changed.
-MULTIVERSION_VERSION="1.2.0"
+MULTIVERSION_VERSION="1.3.0"
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -617,13 +617,16 @@ install_geyser() {
     # Each platform needs its own build of the plugin. Geyser ships builds for
     # Fabric and NeoForge as well; Floodgate does not, so those two get Geyser
     # only and an empty fg_variant skips the second download.
-    local variant plugin_dir fg_variant
+    #
+    # cfg_dir is tracked separately because on Fabric and NeoForge the jar goes
+    # to mods/ but the config lands under config/, not next to the jar.
+    local variant plugin_dir fg_variant cfg_dir
     case "${SERVER_TYPE}" in
-        velocity)             variant="velocity";   fg_variant="velocity"; plugin_dir="plugins" ;;
-        bungeecord|waterfall) variant="bungeecord"; fg_variant="bungee";   plugin_dir="plugins" ;;
-        vanilla|mohist|arclight) variant="spigot";  fg_variant="spigot";   plugin_dir="plugins" ;;
-        fabric)               variant="fabric";     fg_variant="";         plugin_dir="mods" ;;
-        neoforge)             variant="neoforge";   fg_variant="";         plugin_dir="mods" ;;
+        velocity)             variant="velocity";   fg_variant="velocity"; plugin_dir="plugins"; cfg_dir="plugins/Geyser-Velocity" ;;
+        bungeecord|waterfall) variant="bungeecord"; fg_variant="bungee";   plugin_dir="plugins"; cfg_dir="plugins/Geyser-BungeeCord" ;;
+        vanilla|mohist|arclight) variant="spigot";  fg_variant="spigot";   plugin_dir="plugins"; cfg_dir="plugins/Geyser-Spigot" ;;
+        fabric)               variant="fabric";     fg_variant="";         plugin_dir="mods";    cfg_dir="config/Geyser-Fabric" ;;
+        neoforge)             variant="neoforge";   fg_variant="";         plugin_dir="mods";    cfg_dir="config/Geyser-NeoForge" ;;
         *)
             log_warn "Geyser no es compatible con '${SERVER_TYPE}', se omite"
             return 0 ;;
@@ -659,8 +662,49 @@ install_geyser() {
         fi
     fi
 
-    log_warn "Geyser necesita un puerto UDP propio (por defecto 19132)."
-    log_warn "Asignalo en el nodo y configuralo en la config de Geyser (${plugin_dir}/...)."
+    configure_geyser_port "${cfg_dir}"
+}
+
+# Points Geyser at the UDP port the panel assigned to this server.
+#
+# The config schema is the same on every platform (bedrock.address and
+# bedrock.port, verified against Geyser's own GeyserConfig); only the directory
+# it lives in changes, which is what cfg_dir carries.
+configure_geyser_port() {
+    local dir="$1"
+    local port="${GEYSER_PORT:-19132}"
+
+    case "${port}" in
+        ''|*[!0-9]*)
+            log_warn "'Puerto de Geyser' esperaba un numero y recibio '${port}'. Se deja el que tenga la config."
+            return 0 ;;
+    esac
+
+    # Located by pattern rather than by the exact path: if Geyser ever renames
+    # its folder, a search still finds the file while a hardcoded path would
+    # silently start writing a config nobody reads.
+    local cfg
+    cfg=$(find plugins config -maxdepth 2 -name config.yml -path '*Geyser*' 2>/dev/null | head -1)
+
+    if [ -n "${cfg}" ]; then
+        # Re-applied on every boot, so a port change in the panel takes effect
+        # on the next restart without anyone editing YAML by hand.
+        if yq -i ".bedrock.port = ${port} | .bedrock.address = \"0.0.0.0\"" "${cfg}" 2>/dev/null; then
+            log_ok "Geyser escuchara en el puerto UDP ${port}"
+        else
+            log_warn "No se pudo escribir el puerto en ${cfg}. Revisalo a mano."
+        fi
+        return 0
+    fi
+
+    # First boot: Geyser has not generated its config yet. Writing just these
+    # two keys is enough because Geyser fills in every missing option from its
+    # own defaults when it loads the file, so Bedrock works on the first try
+    # instead of failing to bind 19132 and needing a restart.
+    mkdir -p "${dir}"
+    printf 'bedrock:\n  address: 0.0.0.0\n  port: %s\n' "${port}" > "${dir}/config.yml"
+    log_ok "Geyser configurado en el puerto UDP ${port} (${dir}/config.yml)"
+    log_info "El resto de opciones de Geyser se rellenaran solas en este arranque."
 }
 
 # ---------------------------------------------------------------------------
