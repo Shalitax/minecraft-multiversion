@@ -15,7 +15,7 @@ cd /home/container || exit 1
 # Bumped by hand when this file changes in a way worth telling apart in a
 # support ticket. MV_BUILD_* are baked in by the Dockerfile at build time, so
 # a cached image can be identified even when the tag has not changed.
-MULTIVERSION_VERSION="1.0.0"
+MULTIVERSION_VERSION="1.1.0"
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -128,7 +128,33 @@ log_info "Egg Multiversion v${MULTIVERSION_VERSION} | imagen ${MV_BUILD_DATE:-de
 # HTTP client defaults. Fill v3 rejects requests without a descriptive
 # User-Agent, so every curl call in this script goes through these.
 USER_AGENT=${UPDATE_USER_AGENT:-"pterodactyl-mc-multiversion/1.0 (+https://pterodactyl.io)"}
-CURL_OPTS=(--silent --show-error --location --fail --retry 3 --retry-delay 2 --max-time 300 -A "${USER_AGENT}")
+
+# Two profiles on purpose. Everything here runs BEFORE the server starts, so a
+# hung upstream API delays the customer's boot for as long as curl waits. A
+# metadata call that has not answered in 20 seconds is not going to, and giving
+# up costs nothing: the server simply boots on the jar it already has.
+# Worst case per endpoint is now ~60s instead of the ~20 minutes the previous
+# 300s timeout allowed, which is what an outage at any single project's API
+# used to cost every server on the node.
+CURL_BASE=(--silent --show-error --location --fail --connect-timeout 10 --retry 2 --retry-delay 2 -A "${USER_AGENT}")
+CURL_META=("${CURL_BASE[@]}" --max-time 20)
+CURL_OPTS=("${CURL_BASE[@]}" --max-time 600)
+
+# Escapes a string for safe use as a sed replacement. Without this a MOTD
+# containing & or | silently produces a corrupted config file, and a | breaks
+# the sed expression outright.
+#
+# Done with parameter expansion rather than a sed pass of its own: escaping
+# backslashes with sed needs backslashes, and getting that wrong fails quietly
+# in exactly the cases this function exists to handle. Backslash goes first, or
+# it would escape the backslashes the later steps add.
+sed_escape_replacement() {
+    local s="$1"
+    s=${s//\\/\\\\}
+    s=${s//&/\\&}
+    s=${s//|/\\|}
+    printf '%s' "${s}"
+}
 
 # ---------------------------------------------------------------------------
 # Software detection
@@ -174,10 +200,17 @@ detect_server_type() {
         SERVER_TYPE="mohist"
     elif [ -f "arclight.conf" ] || [ -d "arclight" ]; then
         SERVER_TYPE="arclight"
-    elif [ -f ".multiversion-software" ] && grep -qE '^(mohist|arclight)$' .multiversion-software 2>/dev/null; then
-        # First boot: the hybrid has not written its config files yet, so fall
+    elif [ -f ".multiversion-software" ] && grep -qE '^(mohist|arclight|velocity|waterfall|bungeecord)$' .multiversion-software 2>/dev/null; then
+        # First boot: the software has not written its config files yet, so fall
         # back to what the installer recorded.
+        #
+        # Proxies are the case that matters most here. velocity.toml and
+        # config.yml only exist after the proxy has run once, so on a brand-new
+        # server detection would otherwise fall through to "vanilla" and launch
+        # a proxy with 'nogui' as if it were a Minecraft server.
         SERVER_TYPE=$(cat .multiversion-software)
+        # Waterfall and BungeeCord share a type: identical on disk, same launch.
+        [ "${SERVER_TYPE}" = "waterfall" ] && SERVER_TYPE="bungeecord"
     elif ARGS_FILE=$(find_args_file "libraries/net/neoforged/neoforge"); then
         SERVER_TYPE="neoforge"
     elif ARGS_FILE=$(find_args_file "libraries/net/minecraftforge/forge"); then
@@ -286,6 +319,20 @@ apply_proxy_config() {
     local online=""
     is_auto "${MC_ONLINE_MODE}" || online=$(map_bool "${MC_ONLINE_MODE}")
 
+    # A proxy writes its config on first run, so on a brand-new server there is
+    # nothing to patch yet and it will bind to its own default port instead of
+    # the allocated one. Saying so out loud turns "nobody can connect to my new
+    # proxy" into a one-line answer.
+    case "${SERVER_TYPE}" in
+        velocity|bungeecord|waterfall)
+            if [ ! -f velocity.toml ] && [ ! -f config.yml ]; then
+                log_warn "Primer arranque del proxy: aun no existe su archivo de configuracion."
+                log_warn "Arrancara en su puerto por defecto. Reinicia una vez y quedara"
+                log_warn "configurado en el puerto ${SERVER_PORT} que tiene asignado."
+            fi
+            ;;
+    esac
+
     case "${SERVER_TYPE}" in
         velocity)
             if [ -f velocity.toml ]; then
@@ -296,8 +343,10 @@ apply_proxy_config() {
                     log_info "velocity.toml: online-mode = ${online}"
                 fi
                 if ! is_auto "${MC_MOTD}"; then
-                    sed -i -E "s|^\s*motd\s*=.*|motd = \"${MC_MOTD}\"|" velocity.toml
-                    log_info "velocity.toml: motd updated"
+                    local motd_safe
+                    motd_safe=$(sed_escape_replacement "${MC_MOTD}")
+                    sed -i -E "s|^\s*motd\s*=.*|motd = \"${motd_safe}\"|" velocity.toml
+                    log_info "velocity.toml: motd actualizado"
                 fi
             fi
             ;;
@@ -379,6 +428,15 @@ optimize_configs() {
 
     # These files only exist after the server has booted at least once.
     if [ ! -f bukkit.yml ] && [ ! -f spigot.yml ]; then
+        # A pure Vanilla server detects as "vanilla" exactly like every Paper
+        # fork does, but it will never create these files. Without this branch
+        # it printed "se aplicara en el proximo arranque" on every single boot,
+        # forever, for a promise that could never be kept.
+        if [ -f server.properties ] && [ ! -f version_history.json ] && [ ! -d plugins ]; then
+            echo "${OPTIMIZE_PRESET_VERSION}" > "${OPTIMIZE_MARKER}"
+            log_info "Configuracion optimizada: este servidor no usa configs de Bukkit, no se volvera a comprobar"
+            return 0
+        fi
         log_info "Configuracion optimizada: los archivos aun no existen, se aplicara en el proximo arranque"
         return 0
     fi
@@ -432,12 +490,16 @@ optimize_configs() {
 install_geyser() {
     is_true "${INSTALL_GEYSER}" || return 0
 
-    # Each platform needs its own build of the plugin.
+    # Each platform needs its own build of the plugin. Geyser ships builds for
+    # Fabric and NeoForge as well; Floodgate does not, so those two get Geyser
+    # only and an empty fg_variant skips the second download.
     local variant plugin_dir fg_variant
     case "${SERVER_TYPE}" in
         velocity)             variant="velocity";   fg_variant="velocity"; plugin_dir="plugins" ;;
         bungeecord|waterfall) variant="bungeecord"; fg_variant="bungee";   plugin_dir="plugins" ;;
         vanilla|mohist|arclight) variant="spigot";  fg_variant="spigot";   plugin_dir="plugins" ;;
+        fabric)               variant="fabric";     fg_variant="";         plugin_dir="mods" ;;
+        neoforge)             variant="neoforge";   fg_variant="";         plugin_dir="mods" ;;
         *)
             log_warn "Geyser no es compatible con '${SERVER_TYPE}', se omite"
             return 0 ;;
@@ -458,7 +520,10 @@ install_geyser() {
         fi
     fi
 
-    if [ ! -f "${plugin_dir}/floodgate-${fg_variant}.jar" ] || is_true "${GEYSER_AUTO_UPDATE}"; then
+    if [ -z "${fg_variant}" ]; then
+        log_info "Floodgate no publica build para '${SERVER_TYPE}'. Los jugadores de Bedrock"
+        log_info "necesitaran una cuenta de Java, o usa un proxy para tener Floodgate."
+    elif [ ! -f "${plugin_dir}/floodgate-${fg_variant}.jar" ] || is_true "${GEYSER_AUTO_UPDATE}"; then
         log_info "Descargando Floodgate (${fg_variant})..."
         if curl "${CURL_OPTS[@]}" -o "${plugin_dir}/floodgate-${fg_variant}.jar.tmp" \
             "${base}/floodgate/versions/latest/builds/latest/downloads/${fg_variant}"; then
@@ -471,7 +536,7 @@ install_geyser() {
     fi
 
     log_warn "Geyser necesita un puerto UDP propio (por defecto 19132)."
-    log_warn "Asignalo en el nodo y configuralo en plugins/Geyser-Spigot/config.yml"
+    log_warn "Asignalo en el nodo y configuralo en la config de Geyser (${plugin_dir}/...)."
 }
 
 # ---------------------------------------------------------------------------
@@ -620,7 +685,11 @@ print_diagnostics() {
     echo "${C_INFO}--- Resumen del servidor ---${C_RESET}"
     printf '  Software    : %s\n' "${SERVER_TYPE}"
     printf '  Java        : %s (version %s)\n' "${JAVA_RAW}" "${JAVA_MAJOR}"
-    printf '  Memoria     : %s MB asignados\n' "${SERVER_MEMORY}"
+    if [ -z "${SERVER_MEMORY}" ] || [ "${SERVER_MEMORY}" = "0" ]; then
+        printf '  Memoria     : sin limite asignado\n'
+    else
+        printf '  Memoria     : %s MB asignados\n' "${SERVER_MEMORY}"
+    fi
     [ "${plugins}" -gt 0 ] && printf '  Plugins     : %s\n' "${plugins}"
     [ "${mods}" -gt 0 ] && printf '  Mods        : %s\n' "${mods}"
 
@@ -631,21 +700,24 @@ print_diagnostics() {
     # --- Memory warnings ---------------------------------------------------
     # Thresholds are deliberately loose: the goal is to catch the obviously
     # broken setups that generate support tickets, not to be precise.
-    if [ "${SERVER_MEMORY}" -lt 1024 ]; then
-        log_warn "Menos de 1 GB de RAM. Minecraft moderno necesita 2 GB o mas para funcionar bien."
-    fi
-    if [ "${mods}" -gt 50 ] && [ "${SERVER_MEMORY}" -lt 4096 ]; then
-        log_warn "${mods} mods con solo ${SERVER_MEMORY} MB. Un modpack de este tamano suele necesitar 4-6 GB."
-    fi
-    if [ -n "${vd}" ] && [ "${vd}" -gt 12 ] 2>/dev/null && [ "${SERVER_MEMORY}" -lt 4096 ]; then
-        log_warn "Distancia de renderizado ${vd} con ${SERVER_MEMORY} MB. Bajarla a 8 mejoraria bastante el rendimiento."
-    fi
+    # Skipped entirely when memory is unlimited (0), where none of them apply.
+    if [ -n "${SERVER_MEMORY}" ] && [ "${SERVER_MEMORY}" != "0" ]; then
+        if [ "${SERVER_MEMORY}" -lt 1024 ]; then
+            log_warn "Menos de 1 GB de RAM. Minecraft moderno necesita 2 GB o mas para funcionar bien."
+        fi
+        if [ "${mods}" -gt 50 ] && [ "${SERVER_MEMORY}" -lt 4096 ]; then
+            log_warn "${mods} mods con solo ${SERVER_MEMORY} MB. Un modpack de este tamano suele necesitar 4-6 GB."
+        fi
+        if [ -n "${vd}" ] && [ "${vd}" -gt 12 ] 2>/dev/null && [ "${SERVER_MEMORY}" -lt 4096 ]; then
+            log_warn "Distancia de renderizado ${vd} con ${SERVER_MEMORY} MB. Bajarla a 8 mejoraria bastante el rendimiento."
+        fi
 
-    # The JVM cannot grow past the container limit, so an Xmx at 100% of the
-    # allocation leaves nothing for the JVM's own non-heap memory and gets the
-    # container OOM-killed rather than throwing a Java error.
-    if ! is_true "${LOWER_XMX}" && [ "${SERVER_MEMORY}" -ge 4096 ]; then
-        log_info "Con esta memoria, activar 'Reservar memoria para el sistema' suele evitar cierres inesperados."
+        # The JVM cannot grow past the container limit, so an Xmx at 100% of the
+        # allocation leaves nothing for the JVM's own non-heap memory and gets the
+        # container OOM-killed rather than throwing a Java error.
+        if ! is_true "${LOWER_XMX}" && [ "${SERVER_MEMORY}" -ge 4096 ]; then
+            log_info "Con esta memoria, activar 'Reservar memoria para el sistema' suele evitar cierres inesperados."
+        fi
     fi
 
     echo "${C_INFO}----------------------------${C_RESET}"
@@ -702,7 +774,7 @@ verify_checksum() {
 # publish their builds under the STABLE channel.
 paper_latest_version() {
     local project="$1"
-    curl "${CURL_OPTS[@]}" "https://fill.papermc.io/v3/projects/${project}" 2>/dev/null \
+    curl "${CURL_META[@]}" "https://fill.papermc.io/v3/projects/${project}" 2>/dev/null \
         | jq -r '
             [ .versions | to_entries[] | .value[] ] as $all
             | ( [ $all[] | select(test("-(SNAPSHOT|rc|pre)") | not) ][0] // $all[0] // empty )'
@@ -712,7 +784,7 @@ paper_latest_version() {
 # channel, falling back to the newest build of any channel.
 paper_latest_build() {
     local project="$1" version="$2" channel="$3"
-    curl "${CURL_OPTS[@]}" "https://fill.papermc.io/v3/projects/${project}/versions/${version}/builds" 2>/dev/null \
+    curl "${CURL_META[@]}" "https://fill.papermc.io/v3/projects/${project}/versions/${version}/builds" 2>/dev/null \
         | jq -r --arg ch "${channel}" '
             ( [ .[] | select(.channel == $ch) ][0] // .[0] ) as $b
             | if $b == null then empty
@@ -760,12 +832,12 @@ update_purpur() {
     local version="$1"
 
     if is_auto "${version}" || [ "${version}" = "latest" ]; then
-        version=$(curl "${CURL_OPTS[@]}" "https://api.purpurmc.org/v2/purpur" 2>/dev/null | jq -r '.metadata.current // .versions[-1] // empty')
+        version=$(curl "${CURL_META[@]}" "https://api.purpurmc.org/v2/purpur" 2>/dev/null | jq -r '.metadata.current // .versions[-1] // empty')
         [ -z "${version}" ] && { log_warn "No se pudo determinar la ultima version de Purpur, se omite"; return 1; }
     fi
 
     local build
-    build=$(curl "${CURL_OPTS[@]}" "https://api.purpurmc.org/v2/purpur/${version}" 2>/dev/null | jq -r '.builds.latest // empty')
+    build=$(curl "${CURL_META[@]}" "https://api.purpurmc.org/v2/purpur/${version}" 2>/dev/null | jq -r '.builds.latest // empty')
     [ -z "${build}" ] && { log_warn "No hay builds de Purpur para ${version}, se omite"; return 1; }
 
     local marker="purpur-${version}-${build}"
@@ -790,12 +862,12 @@ update_leaves() {
     local version="$1"
 
     if is_auto "${version}" || [ "${version}" = "latest" ]; then
-        version=$(curl "${CURL_OPTS[@]}" "https://api.leavesmc.org/v2/projects/leaves" 2>/dev/null | jq -r '.versions[-1] // empty')
+        version=$(curl "${CURL_META[@]}" "https://api.leavesmc.org/v2/projects/leaves" 2>/dev/null | jq -r '.versions[-1] // empty')
         [ -z "${version}" ] && { log_warn "No se pudo determinar la ultima version de Leaves, se omite"; return 1; }
     fi
 
     local build
-    build=$(curl "${CURL_OPTS[@]}" "https://api.leavesmc.org/v2/projects/leaves/versions/${version}" 2>/dev/null | jq -r '.builds[-1] // empty')
+    build=$(curl "${CURL_META[@]}" "https://api.leavesmc.org/v2/projects/leaves/versions/${version}" 2>/dev/null | jq -r '.builds[-1] // empty')
     [ -z "${build}" ] && { log_warn "No hay builds de Leaves para ${version}, se omite"; return 1; }
 
     local marker="leaves-${version}-${build}"
@@ -806,7 +878,7 @@ update_leaves() {
 
     # One request, both fields: the name for the URL and the hash to verify it.
     local meta name sha
-    meta=$(curl "${CURL_OPTS[@]}" "https://api.leavesmc.org/v2/projects/leaves/versions/${version}/builds/${build}" 2>/dev/null)
+    meta=$(curl "${CURL_META[@]}" "https://api.leavesmc.org/v2/projects/leaves/versions/${version}/builds/${build}" 2>/dev/null)
     name=$(echo "${meta}" | jq -r '.downloads.application.name // empty')
     sha=$(echo "${meta}" | jq -r '.downloads.application.sha256 // empty')
     [ -z "${name}" ] && { log_warn "No se pudo resolver la descarga de Leaves, se omite"; return 1; }
@@ -833,7 +905,7 @@ update_pufferfish() {
     local version="$1" job
 
     if is_auto "${version}" || [ "${version}" = "latest" ]; then
-        job=$(curl "${CURL_OPTS[@]}" "https://ci.pufferfish.host/api/json?tree=jobs[name]" 2>/dev/null \
+        job=$(curl "${CURL_META[@]}" "https://ci.pufferfish.host/api/json?tree=jobs%5Bname%5D" 2>/dev/null \
             | jq -r '[.jobs[].name | select(test("^Pufferfish-[0-9]"))] | sort_by(split("-")[1] | split(".") | map(tonumber)) | last // empty')
     else
         job="Pufferfish-$(echo "${version}" | cut -d. -f1,2)"
@@ -841,7 +913,7 @@ update_pufferfish() {
     [ -z "${job}" ] && { log_warn "No se pudo determinar el job de Pufferfish, se omite"; return 1; }
 
     local info build art
-    info=$(curl "${CURL_OPTS[@]}" "https://ci.pufferfish.host/job/${job}/lastSuccessfulBuild/api/json?tree=number,artifacts[relativePath]" 2>/dev/null)
+    info=$(curl "${CURL_META[@]}" "https://ci.pufferfish.host/job/${job}/lastSuccessfulBuild/api/json?tree=number,artifacts%5BrelativePath%5D" 2>/dev/null)
     build=$(echo "${info}" | jq -r '.number // empty')
     art=$(echo "${info}" | jq -r '.artifacts[0].relativePath // empty')
     [ -z "${art}" ] && { log_warn "No se encontro artefacto en ${job}, se omite"; return 1; }
@@ -865,11 +937,38 @@ update_pufferfish() {
     fi
 }
 
+# BungeeCord is a single jar on md-5's Jenkins with no versions to choose from,
+# so the build number is the whole story.
+update_bungeecord() {
+    local info build
+    info=$(curl "${CURL_META[@]}" "https://ci.md-5.net/job/BungeeCord/lastSuccessfulBuild/api/json?tree=number" 2>/dev/null)
+    build=$(echo "${info}" | jq -r '.number // empty')
+    [ -z "${build}" ] && { log_warn "No se pudo consultar el ultimo build de BungeeCord, se omite"; return 1; }
+
+    local marker="bungeecord-${build}"
+    if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "${marker}" ] && [ -f "${SERVER_JARFILE}" ]; then
+        log_ok "BungeeCord build ${build} ya esta actualizado"
+        return 0
+    fi
+
+    log_info "Descargando BungeeCord build ${build}"
+    if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" \
+        "https://ci.md-5.net/job/BungeeCord/lastSuccessfulBuild/artifact/bootstrap/target/BungeeCord.jar"; then
+        mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
+        echo "${marker}" > "${STATE_FILE}"
+        log_ok "Actualizado a BungeeCord build ${build}"
+    else
+        rm -f "${SERVER_JARFILE}.tmp"
+        log_error "Fallo la descarga, se mantiene el jar actual"
+        return 1
+    fi
+}
+
 update_vanilla() {
     local version="$1"
     local manifest="https://launchermeta.mojang.com/mc/game/version_manifest.json"
     local json
-    json=$(curl "${CURL_OPTS[@]}" "${manifest}" 2>/dev/null)
+    json=$(curl "${CURL_META[@]}" "${manifest}" 2>/dev/null)
     [ -z "${json}" ] && { log_warn "No se pudo contactar con el servidor de Mojang, se omite"; return 1; }
 
     if is_auto "${version}" || [ "${version}" = "latest" ]; then
@@ -890,7 +989,7 @@ update_vanilla() {
 
     # One request, both fields. Mojang publishes sha1 rather than sha256.
     local meta sha
-    meta=$(curl "${CURL_OPTS[@]}" "${version_url}" 2>/dev/null)
+    meta=$(curl "${CURL_META[@]}" "${version_url}" 2>/dev/null)
     download_url=$(echo "${meta}" | jq -r '.downloads.server.url // empty')
     sha=$(echo "${meta}" | jq -r '.downloads.server.sha1 // empty')
     [ -z "${download_url}" ] && { log_warn "Vanilla ${version} no tiene archivo de servidor, se omite"; return 1; }
@@ -944,12 +1043,17 @@ marker_matches_type() {
                 [ "${fork}" = "$1" ] || return 1
             fi
             return 0 ;;
-        velocity)  [ "${SERVER_TYPE}" = "velocity" ] ;;
-        waterfall) [ "${SERVER_TYPE}" = "bungeecord" ] ;;
-        fabric)    [ "${SERVER_TYPE}" = "fabric" ] ;;
-        mohist)    [ "${SERVER_TYPE}" = "mohist" ] ;;
-        arclight)  [ "${SERVER_TYPE}" = "arclight" ] ;;
-        *)         return 1 ;;
+        velocity)   [ "${SERVER_TYPE}" = "velocity" ] ;;
+        # Waterfall and BungeeCord are indistinguishable on disk and share a type.
+        waterfall|bungeecord) [ "${SERVER_TYPE}" = "bungeecord" ] ;;
+        fabric)     [ "${SERVER_TYPE}" = "fabric" ] ;;
+        quilt)      [ "${SERVER_TYPE}" = "quilt" ] ;;
+        # Pre-1.17 Forge detects as forge-legacy; both come from the same installer.
+        forge)      [ "${SERVER_TYPE}" = "forge" ] || [ "${SERVER_TYPE}" = "forge-legacy" ] ;;
+        neoforge)   [ "${SERVER_TYPE}" = "neoforge" ] ;;
+        mohist)     [ "${SERVER_TYPE}" = "mohist" ] ;;
+        arclight)   [ "${SERVER_TYPE}" = "arclight" ] ;;
+        *)          return 1 ;;
     esac
 }
 
@@ -973,9 +1077,12 @@ run_auto_update() {
                 return 0
             fi
         else
+            # Only Velocity is safe to infer: velocity.toml identifies it and
+            # nothing else. BungeeCord and Waterfall are byte-identical on disk,
+            # so guessing between them would swap one for the other behind the
+            # customer's back.
             case "${SERVER_TYPE}" in
                 velocity)   project="velocity" ;;
-                bungeecord) project="waterfall" ;;
                 *)          project="" ;;
             esac
         fi
@@ -999,6 +1106,8 @@ run_auto_update() {
             update_pufferfish "${UPDATE_MC_VERSION}" ;;
         vanilla)
             update_vanilla "${UPDATE_MC_VERSION}" ;;
+        bungeecord)
+            update_bungeecord ;;
         mohist|arclight|fabric|quilt|forge|neoforge)
             log_warn "'${project}' no se puede actualizar solo: hay que regenerar sus librerias."
             log_warn "Reinstala desde el panel para cambiar de version." ;;
@@ -1015,6 +1124,16 @@ JVM_FLAGS=()
 
 build_memory_flags() {
     local xms="${SERVER_MIN_MEMORY:-128}"
+
+    # Pterodactyl uses 0 to mean "no memory limit". Passing that through would
+    # produce -Xmx0M, which the JVM rejects outright, so an unlimited-RAM plan
+    # could never boot. Sizing from the container is the only correct answer
+    # here anyway, since there is no fixed number to pin the heap to.
+    if [ -z "${SERVER_MEMORY}" ] || [ "${SERVER_MEMORY}" = "0" ]; then
+        JVM_FLAGS+=("-XX:MaxRAMPercentage=${MAX_RAM_PERCENTAGE:-80.0}")
+        log_info "Memoria sin limite asignado: se usara hasta ${MAX_RAM_PERCENTAGE:-80.0}% de la disponible"
+        return 0
+    fi
 
     if is_true "${LOWER_XMX}"; then
         # Let the JVM size the heap from the container limit instead of pinning
@@ -1140,16 +1259,27 @@ build_compat_flags() {
 
 # Minimum Java feature version required by each Minecraft release, used to warn
 # before the JVM produces an UnsupportedClassVersionError nobody can read.
+#
+# Source of truth when adding a new Minecraft release:
+#   https://fill.papermc.io/v3/projects/paper/versions/<version>
+# publishes version.java.version.minimum. Checking it beats guessing: the jump
+# from 21 to 25 arrived with the 26.x calendar releases and nothing in the
+# version number hints at it.
 required_java_for() {
     local mc="$1"
     case "${mc}" in
         1.8*|1.9*|1.10*|1.11*|1.12*)   echo 8 ;;
         1.13*|1.14*|1.15*|1.16*)       echo 8 ;;
         1.17*)                         echo 16 ;;
-        1.18*|1.19*|1.20.[0-4]*)       echo 17 ;;
+        1.18*|1.19*)                   echo 17 ;;
+        # 1.20 through 1.20.4 are Java 17; 1.20.5 raised it to 21. The bare
+        # "1.20" needs its own branch or it falls through to the 21 line below.
+        1.20|1.20.[0-4]*)              echo 17 ;;
         1.20*|1.21*)                   echo 21 ;;
-        # Calendar-versioned releases (25.x, 26.x and later) are all Java 21+.
-        2[0-9].*)                      echo 21 ;;
+        # Calendar-versioned releases. 26.x requires Java 25, verified against
+        # Paper's own API; anything newer is assumed to need at least as much.
+        2[0-5].*)                      echo 21 ;;
+        26.*|2[7-9].*|[3-9][0-9].*)    echo 25 ;;
         *)                             echo 0 ;;
     esac
 }
@@ -1227,9 +1357,19 @@ build_command_manual() {
     build_compat_flags
 
     if [ ${#JVM_FLAGS[@]} -gt 0 ]; then
-        local injected="${JVM_FLAGS[*]}"
+        local injected
+        # Escaped: EXTRA_JAVA_ARGS ends up in here, and a | in a customer's
+        # flags would otherwise terminate the sed expression.
+        injected=$(sed_escape_replacement "${JVM_FLAGS[*]}")
         # Insert after the heap flag so the arguments stay in a valid order.
-        parsed=$(echo "${parsed}" | sed -E "s|(-Xmx[0-9]+[KMG]?)|\1 ${injected}|")
+        if echo "${parsed}" | grep -qE '\-Xmx[0-9]+[KMG]?'; then
+            parsed=$(echo "${parsed}" | sed -E "s|(-Xmx[0-9]+[KMG]?)|\1 ${injected}|")
+        else
+            # No heap flag to anchor to. Silently dropping the flags here is
+            # what made "my Aikar flags do nothing" impossible to diagnose.
+            log_warn "El comando de inicio no tiene -Xmx, no se pudieron insertar las flags de la JVM."
+            log_warn "Anadelas a mano al comando, o usa el modo de arranque 'auto'."
+        fi
     fi
 
     MANUAL_CMD="${parsed}"

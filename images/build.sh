@@ -21,7 +21,7 @@ REGISTRY="${REGISTRY:-ghcr.io/shalitax/minecraft-multiversion}"
 PUSH="${PUSH:-0}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 
-ALL_TAGS=(8 8j9 11 11j9 16 16j9 17 17j9 18 18j9 19 19j9 21 22 23 24 25)
+ALL_TAGS=(8 8j9 11 11j9 16 16j9 17 17j9 18 18j9 19 19j9 20 21 22 23 24 25)
 
 # The IBM Semeru base images have no arm64 build, so those tags stay amd64-only.
 amd64_only() {

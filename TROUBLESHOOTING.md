@@ -20,7 +20,7 @@ Las dos primeras líneas de la consola identifican el entorno:
 
 ```
 [i] Java 21.0.5 (version 21) | Zona horaria UTC | IP 172.18.0.5
-[i] Egg Multiversion v1.0.0 | imagen 2026-08-03 01:34 UTC (20260803-a1b2c3d)
+[i] Egg Multiversion v1.1.0 | imagen 2026-08-03 01:34 UTC (20260803-a1b2c3d)
 ```
 
 Sin eso no se puede diagnosticar nada: **Wings cachea las imágenes**, así que
@@ -102,6 +102,54 @@ aparte*: los saca a `mods-desactivados/` sin borrarlos y el servidor arranca.
 
 ---
 
+## La instalación falla
+
+Estos mensajes salen en la consola de **instalación**, no en la del servidor.
+
+### `Ejecutando el instalador de forge. Esto puede tardar varios minutos.`
+
+No es un error. Forge, NeoForge y Quilt no publican un jar listo para usar: hay
+que ejecutar su instalador, que descarga las librerías una a una. Entre 2 y 10
+minutos es normal; el resto de softwares es una única descarga.
+
+**Respuesta:** esperar. Si el cliente reinstala a mitad, empieza de cero.
+
+### `ERROR: Forge no publica builds para Minecraft X.`
+
+La versión pedida no existe en Forge. El mensaje lista debajo las versiones que
+sí existen.
+
+**Respuesta:** elegir una de las listadas, o poner `latest`.
+
+> NeoForge solo existe desde Minecraft 1.20.2. Para versiones anteriores hay que
+> usar `forge`.
+
+### `ERROR: no se pudo consultar las versiones de Arclight en GitHub.`
+
+GitHub limita a **60 consultas por hora y por IP**, y esa IP la comparte todo el
+nodo. Con varias instalaciones de Arclight seguidas se agota.
+
+**Respuesta:** reintentar en unos minutos. Solo afecta a Arclight; ningún otro
+software usa la API de GitHub.
+
+### `ERROR: no se pudo instalar ningun Java para ejecutar el instalador.`
+
+El contenedor de instalación no trae JVM y se instala una al vuelo solo para
+Forge, NeoForge y Quilt. Si esto falla, el nodo no llega a los repositorios de
+Alpine.
+
+**Respuesta:** es un problema de red del nodo, no del cliente. Escalar.
+
+### `La API del proyecto no respondio.`
+
+El proyecto elegido (Leaves, Mohist, Purpur...) tiene su API caída. La
+instalación se detiene con un mensaje claro en vez de dejar un servidor a medias.
+
+**Respuesta:** reintentar más tarde, o instalar otro software. Paper y Vanilla
+son los más fiables porque sus APIs casi nunca fallan.
+
+---
+
 ## Problemas de versión de Java
 
 ### `[!] Minecraft X necesita Java Y o superior, y esta imagen tiene Java Z.`
@@ -116,10 +164,18 @@ rápida:
 | 1.16 y anteriores | 8 |
 | 1.17 | 16 |
 | 1.18 – 1.20.4 | 17 |
-| 1.20.5 en adelante, y 25.x/26.x | 21 |
+| 1.20.5 – 1.21.x | 21 |
+| 26.x en adelante | **25** |
 
 Forge anterior a 1.17 **necesita Java 8**; con versiones más nuevas falla de
 formas poco claras.
+
+> El salto a Java 25 llegó con las versiones de calendario (26.x) y nada en el
+> número de versión lo anticipa. Al aparecer una versión nueva de Minecraft,
+> confirma el mínimo real en
+> `https://fill.papermc.io/v3/projects/paper/versions/<version>`, campo
+> `version.java.version.minimum`, y actualiza la tabla de `required_java_for`
+> en el entrypoint.
 
 ### `[!] ZGC necesita Java 15 o superior. Se usa el recolector por defecto.`
 
@@ -173,6 +229,11 @@ a mano en **Qué actualizar** en vez de dejarlo en `Automático`.
 La API del proyecto no respondió. **El servidor arranca igual** con la versión
 que ya tenía.
 
+Las consultas de metadatos abandonan a los 20 segundos (60 como mucho contando
+reintentos), así que una API caída retrasa el arranque unos segundos, no lo
+bloquea. Si un proyecto lleva días caído, sus servidores siguen funcionando:
+simplemente dejan de recibir actualizaciones.
+
 **Respuesta:** ninguna. Si persiste días, avisar al equipo técnico.
 
 ---
@@ -222,8 +283,18 @@ casi seguro: falta asignar el puerto UDP al servidor desde el nodo.
 
 ### `[!] Geyser no es compatible con 'forge', se omite`
 
-Geyser necesita una plataforma con plugins (Paper y derivados, o un proxy). En
-Forge o Fabric puros no hay dónde instalarlo.
+Geyser publica builds para Paper y derivados, los proxies (Velocity,
+BungeeCord, Waterfall), **Fabric y NeoForge**. Forge a secas y Quilt se quedan
+fuera porque Geyser no publica nada para ellos.
+
+### `[i] Floodgate no publica build para 'fabric'`
+
+En Fabric y NeoForge se instala Geyser pero **no Floodgate**, porque el
+proyecto no publica esas versiones. Consecuencia práctica: los jugadores de
+Bedrock pueden entrar, pero necesitan una cuenta de Java.
+
+**Respuesta:** si el cliente quiere Bedrock sin cuenta de Java en un servidor de
+mods, la solución es poner un proxy (Velocity) delante y activar Geyser ahí.
 
 ---
 

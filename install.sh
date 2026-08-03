@@ -45,7 +45,13 @@ case "$(echo "${WIPE_ON_INSTALL:-1}" | tr '[:upper:]' '[:lower:]')" in
 esac
 
 UA="pterodactyl-mc-multiversion/1.0 (+https://hexservers.com)"
-fetch() { curl -sSL --fail --retry 3 --retry-delay 2 -A "${UA}" "$@"; }
+
+# Two clients on purpose. Metadata calls must give up quickly: an upstream API
+# that hangs would otherwise keep the whole install job blocked until Wings
+# times it out, with nothing on screen to explain why. Jar downloads get a much
+# longer budget because a modpack-sized artifact legitimately takes minutes.
+fetch()      { curl -sSL --fail --connect-timeout 10 --max-time 900 --retry 3 --retry-delay 2 -A "${UA}" "$@"; }
+fetch_meta() { curl -sSL --fail --connect-timeout 10 --max-time 30  --retry 2 --retry-delay 2 -A "${UA}" "$@"; }
 
 SOFTWARE=$(echo "${SERVER_SOFTWARE:-paper}" | tr '[:upper:]' '[:lower:]')
 VERSION="${SERVER_VERSION:-latest}"
@@ -64,6 +70,138 @@ if [ "${SOFTWARE}" = "none" ]; then
     exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# Turns an empty API response into a message the support team can act on.
+# Without this the script dies on curl's own exit code and the console shows
+# nothing but "installation failed".
+require_data() {
+    if [ -z "$1" ]; then
+        echo "ERROR: $2" >&2
+        echo "La API del proyecto no respondio. Reintenta en unos minutos; si sigue" >&2
+        echo "fallando, elige otro software o instala una version concreta." >&2
+        exit 1
+    fi
+}
+
+# Checks a download against the hash the API published for it. A truncated jar
+# otherwise fails much later as an unreadable Java error.
+# No hash available means no check: not every project publishes one.
+verify_sha() {
+    FILE="$1"
+    EXPECTED="$2"
+    ALGO="${3:-sha256}"
+
+    if [ -z "${EXPECTED}" ] || [ "${EXPECTED}" = "null" ]; then
+        return 0
+    fi
+
+    case "${ALGO}" in
+        sha1) ACTUAL=$(sha1sum "${FILE}" 2>/dev/null | awk '{print $1}') ;;
+        *)    ACTUAL=$(sha256sum "${FILE}" 2>/dev/null | awk '{print $1}') ;;
+    esac
+
+    if [ -z "${ACTUAL}" ]; then
+        echo "Aviso: no se pudo calcular el hash, se omite la comprobacion."
+        return 0
+    fi
+
+    if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+        echo "ERROR: la descarga esta corrupta, el hash no coincide con el publicado." >&2
+        rm -f "${FILE}"
+        exit 1
+    fi
+
+    echo "Integridad de la descarga verificada (${ALGO})."
+}
+
+# Minimum Java feature version needed to RUN the modloader installer. Not the
+# same question as what the finished server needs: the installer is an ordinary
+# Java program, and running it on a newer JVM than its target is usually fine
+# while running it on an older one never is.
+installer_java_for() {
+    case "$1" in
+        latest|"")           echo 21 ;;
+        1.8*|1.9*|1.1[0-6]*) echo 8 ;;
+        1.17*)               echo 17 ;;
+        *)                   echo 21 ;;
+    esac
+}
+
+# Forge, NeoForge and Quilt ship an installer that has to be executed, and the
+# Pterodactyl installer image has no JVM at all. Only those three pay this cost;
+# every other software is a plain download.
+ensure_java() {
+    if command -v java >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ! command -v apk >/dev/null 2>&1; then
+        echo "ERROR: ${SOFTWARE} necesita Java para ejecutar su instalador, y este" >&2
+        echo "contenedor de instalacion no lo trae ni permite instalarlo." >&2
+        exit 1
+    fi
+
+    # Newest first from the version requested: a fallback upwards works far more
+    # often than downwards, and Alpine does not carry every JDK on every release.
+    case "$1" in
+        8)     CANDIDATES="openjdk8-jre openjdk11-jre-headless openjdk17-jre-headless" ;;
+        16|17) CANDIDATES="openjdk17-jre-headless openjdk21-jre-headless openjdk11-jre-headless" ;;
+        *)     CANDIDATES="openjdk21-jre-headless openjdk17-jre-headless openjdk25-jre-headless" ;;
+    esac
+
+    echo "Instalando temporalmente Java para ejecutar el instalador de ${SOFTWARE}..."
+    for PKG in ${CANDIDATES}; do
+        if apk add --no-cache "${PKG}" >/dev/null 2>&1; then
+            echo "Java disponible: $(java -version 2>&1 | head -1)"
+            return 0
+        fi
+    done
+
+    echo "ERROR: no se pudo instalar ningun Java para ejecutar el instalador." >&2
+    echo "Probados: ${CANDIDATES}" >&2
+    exit 1
+}
+
+# Runs a modloader installer and leaves the server in a state the entrypoint
+# can detect on its own.
+run_modloader_installer() {
+    INSTALLER_JAR="$1"
+    shift
+
+    echo "Ejecutando el instalador de ${SOFTWARE}. Esto puede tardar varios minutos."
+    if ! java -jar "${INSTALLER_JAR}" "$@"; then
+        echo "ERROR: el instalador de ${SOFTWARE} termino con error." >&2
+        exit 1
+    fi
+
+    rm -f "${INSTALLER_JAR}" "${INSTALLER_JAR}.log" installer.log
+
+    # Forge and NeoForge from 1.17 onwards start from an args file that carries
+    # the whole classpath. The entrypoint finds it by itself, so there is
+    # nothing left to arrange here.
+    if find libraries -name unix_args.txt 2>/dev/null | grep -q .; then
+        echo "Instalacion completada. El servidor arranca desde su archivo de argumentos."
+        return 0
+    fi
+
+    # Older Forge leaves a single runnable jar under a name that changes with
+    # every build. Renaming it to the configured jar keeps the panel's "Archivo
+    # JAR del servidor" option meaningful.
+    for CAND in forge-*-universal.jar forge-*-shim.jar forge-*.jar; do
+        if [ -f "${CAND}" ] && [ "${CAND}" != "${JARFILE}" ]; then
+            mv "${CAND}" "${JARFILE}"
+            echo "Instalacion completada. Servidor listo en ${JARFILE}."
+            return 0
+        fi
+    done
+
+    echo "Aviso: el instalador no dejo ni archivo de argumentos ni un jar reconocible."
+    echo "Revisa la consola de instalacion antes de arrancar el servidor."
+}
+
 # --- PaperMC family (paper, folia, velocity, waterfall) --------------------
 # api.papermc.io/v2 was shut down on 2026-07-01; everything goes through the
 # Fill v3 API, which rejects requests without a descriptive User-Agent.
@@ -75,111 +213,290 @@ install_paper_family() {
     # Filtering by build channel does not help, since snapshot versions still
     # publish their builds under the STABLE channel.
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
-        VERSION=$(fetch "https://fill.papermc.io/v3/projects/${PROJECT}" | jq -r '
+        VERSION=$(fetch_meta "https://fill.papermc.io/v3/projects/${PROJECT}" | jq -r '
             [ .versions | to_entries[] | .value[] ] as $all
             | ( [ $all[] | select(test("-(SNAPSHOT|rc|pre)") | not) ][0] // $all[0] // empty )')
+        require_data "${VERSION}" "no se pudo determinar una version para ${PROJECT}."
         echo "Ultima version de ${PROJECT}: ${VERSION}"
     fi
 
-    if [ -z "${VERSION}" ]; then
-        echo "ERROR: no se pudo determinar una version para ${PROJECT}." >&2
-        exit 1
-    fi
-
-    URL=$(fetch "https://fill.papermc.io/v3/projects/${PROJECT}/versions/${VERSION}/builds" \
+    # One request for both the URL and the hash that validates it.
+    BUILD_JSON=$(fetch_meta "https://fill.papermc.io/v3/projects/${PROJECT}/versions/${VERSION}/builds" \
         | jq -r --arg ch "${CHANNEL}" '
             ( [ .[] | select(.channel == $ch) ][0] // .[0] ) as $b
-            | if $b == null then empty else $b.downloads["server:default"].url end')
+            | if $b == null then empty
+              else "\($b.downloads["server:default"].url) \($b.downloads["server:default"].checksums.sha256 // "")"
+              end')
 
-    if [ -z "${URL}" ]; then
-        echo "ERROR: no se encontraron builds para ${PROJECT} ${VERSION}." >&2
-        exit 1
-    fi
+    require_data "${BUILD_JSON}" "no se encontraron builds para ${PROJECT} ${VERSION}."
+
+    URL=$(echo "${BUILD_JSON}" | cut -d' ' -f1)
+    SHA=$(echo "${BUILD_JSON}" | cut -d' ' -f2)
 
     echo "Descargando ${URL}"
     fetch -o "${JARFILE}" "${URL}"
+    verify_sha "${JARFILE}" "${SHA}" sha256
 }
 
 # --- Purpur ----------------------------------------------------------------
 install_purpur() {
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
-        VERSION=$(fetch "https://api.purpurmc.org/v2/purpur" | jq -r '.metadata.current // .versions[-1]')
+        VERSION=$(fetch_meta "https://api.purpurmc.org/v2/purpur" | jq -r '.metadata.current // .versions[-1] // empty')
+        require_data "${VERSION}" "no se pudo determinar la ultima version de Purpur."
         echo "Ultima version de Purpur: ${VERSION}"
     fi
 
-    echo "Descargando Purpur ${VERSION}"
-    fetch -o "${JARFILE}" "https://api.purpurmc.org/v2/purpur/${VERSION}/latest/download"
+    # Validated up front so a mistyped version gives a readable message instead
+    # of a bare curl 404 from the download step.
+    BUILD=$(fetch_meta "https://api.purpurmc.org/v2/purpur/${VERSION}" 2>/dev/null | jq -r '.builds.latest // empty')
+    require_data "${BUILD}" "Purpur no publica builds para la version ${VERSION}."
+
+    echo "Descargando Purpur ${VERSION} build ${BUILD}"
+    fetch -o "${JARFILE}" "https://api.purpurmc.org/v2/purpur/${VERSION}/${BUILD}/download"
 }
 
 # --- Vanilla ---------------------------------------------------------------
 install_vanilla() {
     MANIFEST="https://launchermeta.mojang.com/mc/game/version_manifest.json"
 
+    # Fetched once and reused: three separate calls for the same file only
+    # multiplied the chances of one of them failing.
+    MANIFEST_JSON=$(fetch_meta "${MANIFEST}")
+    require_data "${MANIFEST_JSON}" "no se pudo contactar con el servidor de Mojang."
+
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
-        VERSION=$(fetch "${MANIFEST}" | jq -r '.latest.release')
+        VERSION=$(echo "${MANIFEST_JSON}" | jq -r '.latest.release')
     elif [ "${VERSION}" = "snapshot" ]; then
-        VERSION=$(fetch "${MANIFEST}" | jq -r '.latest.snapshot')
+        VERSION=$(echo "${MANIFEST_JSON}" | jq -r '.latest.snapshot')
     fi
     echo "Version de Vanilla: ${VERSION}"
 
-    VERSION_URL=$(fetch "${MANIFEST}" | jq -r --arg v "${VERSION}" '.versions[] | select(.id == $v) | .url')
-    if [ -z "${VERSION_URL}" ]; then
-        echo "ERROR: no existe la version de Vanilla ${VERSION}." >&2
-        exit 1
-    fi
+    VERSION_URL=$(echo "${MANIFEST_JSON}" | jq -r --arg v "${VERSION}" '.versions[] | select(.id == $v) | .url')
+    require_data "${VERSION_URL}" "no existe la version de Vanilla ${VERSION}."
 
-    DOWNLOAD_URL=$(fetch "${VERSION_URL}" | jq -r '.downloads.server.url')
+    META=$(fetch_meta "${VERSION_URL}")
+    DOWNLOAD_URL=$(echo "${META}" | jq -r '.downloads.server.url // empty')
+    # Mojang publishes sha1 rather than sha256.
+    SHA=$(echo "${META}" | jq -r '.downloads.server.sha1 // empty')
+    require_data "${DOWNLOAD_URL}" "Vanilla ${VERSION} no publica archivo de servidor."
+
     echo "Descargando ${DOWNLOAD_URL}"
     fetch -o "${JARFILE}" "${DOWNLOAD_URL}"
+    verify_sha "${JARFILE}" "${SHA}" sha1
 }
 
 # --- Fabric ----------------------------------------------------------------
 # Fabric publishes a ready-made launcher jar, so no installer run is needed.
 install_fabric() {
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
-        VERSION=$(fetch "https://meta.fabricmc.net/v2/versions/game" | jq -r '[.[] | select(.stable == true)][0].version')
+        VERSION=$(fetch_meta "https://meta.fabricmc.net/v2/versions/game" | jq -r '[.[] | select(.stable == true)][0].version // empty')
+        require_data "${VERSION}" "no se pudo determinar la ultima version de Fabric."
     fi
-    LOADER=$(fetch "https://meta.fabricmc.net/v2/versions/loader" | jq -r '[.[] | select(.stable == true)][0].version')
-    INSTALLER=$(fetch "https://meta.fabricmc.net/v2/versions/installer" | jq -r '[.[] | select(.stable == true)][0].version')
+    LOADER=$(fetch_meta "https://meta.fabricmc.net/v2/versions/loader" | jq -r '[.[] | select(.stable == true)][0].version // empty')
+    INSTALLER=$(fetch_meta "https://meta.fabricmc.net/v2/versions/installer" | jq -r '[.[] | select(.stable == true)][0].version // empty')
+    require_data "${LOADER}" "no se pudo determinar el loader de Fabric."
+    require_data "${INSTALLER}" "no se pudo determinar el instalador de Fabric."
 
     echo "Fabric: juego ${VERSION}, loader ${LOADER}, instalador ${INSTALLER}"
     fetch -o "${JARFILE}" \
         "https://meta.fabricmc.net/v2/versions/loader/${VERSION}/${LOADER}/${INSTALLER}/server/jar"
 }
 
+# --- Quilt -----------------------------------------------------------------
+# Unlike Fabric, Quilt publishes no ready-made server jar: its installer has to
+# be run, and it produces quilt-server-launch.jar, which the entrypoint detects.
+install_quilt() {
+    ensure_java 17
+
+    if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
+        # Quilt tracks Minecraft's own versions, and Fabric's meta is the
+        # simplest source for "newest stable Minecraft".
+        VERSION=$(fetch_meta "https://meta.fabricmc.net/v2/versions/game" | jq -r '[.[] | select(.stable == true)][0].version // empty')
+        require_data "${VERSION}" "no se pudo determinar la ultima version de Minecraft para Quilt."
+    fi
+
+    IURL=$(fetch_meta "https://meta.quiltmc.org/v3/versions/installer" | jq -r '.[0].url // empty')
+    require_data "${IURL}" "no se pudo determinar el instalador de Quilt."
+
+    echo "Descargando el instalador de Quilt"
+    fetch -o quilt-installer.jar "${IURL}"
+
+    echo "Instalando Quilt para Minecraft ${VERSION}. Esto puede tardar varios minutos."
+    if ! java -jar quilt-installer.jar install server "${VERSION}" --download-server --install-dir=.; then
+        echo "ERROR: el instalador de Quilt termino con error." >&2
+        exit 1
+    fi
+    rm -f quilt-installer.jar
+
+    if [ ! -f quilt-server-launch.jar ]; then
+        echo "ERROR: el instalador no genero quilt-server-launch.jar." >&2
+        exit 1
+    fi
+    echo "Instalacion completada. El servidor arranca desde quilt-server-launch.jar."
+}
+
+# --- Forge -----------------------------------------------------------------
+# promotions_slim.json maps "<mc>-latest" / "<mc>-recommended" to a build
+# number; the full version string is "<mc>-<build>".
+install_forge() {
+    ensure_java "$(installer_java_for "${VERSION}")"
+
+    PROMOS=$(fetch_meta "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json")
+    require_data "${PROMOS}" "no se pudo consultar las versiones de Forge."
+
+    if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
+        # The file lists promotions oldest first, so the last "-latest" entry is
+        # the newest Minecraft version Forge supports.
+        FULL=$(echo "${PROMOS}" | jq -r '
+            .promos | to_entries
+            | [ .[] | select(.key | endswith("-latest")) ] | last
+            | if . == null then empty else "\(.key | sub("-latest$";""))-\(.value)" end')
+        require_data "${FULL}" "no se pudo determinar la ultima version de Forge."
+    else
+        # Recommended is preferred: it is the build Forge itself considers safe.
+        BUILD=$(echo "${PROMOS}" | jq -r --arg v "${VERSION}" \
+            '.promos["\($v)-recommended"] // .promos["\($v)-latest"] // empty')
+        if [ -z "${BUILD}" ]; then
+            echo "ERROR: Forge no publica builds para Minecraft ${VERSION}." >&2
+            echo "Versiones disponibles:" >&2
+            echo "${PROMOS}" | jq -r '.promos | keys[] | select(endswith("-latest")) | sub("-latest$";"")' \
+                | tail -25 | tr '\n' ' ' >&2
+            echo >&2
+            exit 1
+        fi
+        FULL="${VERSION}-${BUILD}"
+    fi
+
+    echo "Instalando Forge ${FULL}"
+    fetch -o forge-installer.jar \
+        "https://maven.minecraftforge.net/net/minecraftforge/forge/${FULL}/forge-${FULL}-installer.jar"
+    run_modloader_installer forge-installer.jar --installServer
+}
+
+# --- NeoForge --------------------------------------------------------------
+# NeoForge versions drop Minecraft's leading "1.": Minecraft 1.21.1 is served by
+# NeoForge 21.1.x. Calendar-versioned Minecraft keeps its own number instead.
+neoforge_prefix() {
+    echo "$1" | awk -F. '
+        $1 == 1 && NF >= 3 { printf "%s.%s.", $2, $3; exit }
+        $1 == 1 && NF == 2 { printf "%s.0.", $2; exit }
+        NF == 2            { printf "%s.%s.0.", $1, $2; exit }
+                           { printf "%s.", $0 }'
+}
+
+# Highest version from a list of dotted numeric versions, read on stdin.
+#
+# Builds a zero-padded sort key rather than relying on `sort -t. -k1,1n ...`:
+# BusyBox's sort does not have to support per-key numeric modifiers, and if it
+# quietly falls back to a lexical compare it picks 21.1.9 over 21.1.248 without
+# any error to notice. Plain lexical sort over a padded key is correct
+# everywhere.
+neoforge_highest() {
+    awk -F. '{ printf "%05d%05d%05d%05d %s\n", $1, $2, $3, $4, $0 }' \
+        | sort | tail -1 | cut -d' ' -f2
+}
+
+install_neoforge() {
+    ensure_java "$(installer_java_for "${VERSION}")"
+
+    XML=$(fetch_meta "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml")
+    require_data "${XML}" "no se pudo consultar las versiones de NeoForge."
+
+    ALL=$(echo "${XML}" | grep -oE '<version>[^<]+</version>' | sed -e 's|<version>||' -e 's|</version>||')
+    require_data "${ALL}" "la lista de versiones de NeoForge llego vacia."
+
+    if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
+        NEO=$(echo "${ALL}" | grep -v -- '-beta' | neoforge_highest)
+    else
+        PREFIX=$(neoforge_prefix "${VERSION}")
+        # awk index() instead of grep: the prefix is a literal whose dots must
+        # not act as regex wildcards. Escaping them for grep works, but "21.1."
+        # as a regex silently also matches 21.11.x, and that mistake picks a
+        # build for a completely different Minecraft version.
+        MATCHES=$(echo "${ALL}" | awk -v p="${PREFIX}" 'index($0, p) == 1')
+
+        NEO=""
+        if [ -n "${MATCHES}" ]; then
+            NEO=$(echo "${MATCHES}" | grep -v -- '-beta' | neoforge_highest)
+            # Nothing stable yet for that Minecraft version: a beta is better
+            # than failing, and NeoForge ships betas for months before promoting
+            # them.
+            if [ -z "${NEO}" ]; then
+                NEO=$(echo "${MATCHES}" | neoforge_highest)
+            fi
+        fi
+        # Also accept a NeoForge version typed directly instead of a Minecraft one.
+        if [ -z "${NEO}" ]; then
+            NEO=$(echo "${ALL}" | grep -x -- "${VERSION}" || true)
+        fi
+        if [ -z "${NEO}" ]; then
+            echo "ERROR: NeoForge no publica builds para Minecraft ${VERSION}." >&2
+            echo "NeoForge solo existe desde Minecraft 1.20.2." >&2
+            echo "Ultimas versiones disponibles:" >&2
+            echo "${ALL}" | grep -v -- '-beta' | awk -F. '{ printf "%05d%05d%05d%05d %s\n", $1, $2, $3, $4, $0 }' \
+                | sort | tail -10 | cut -d' ' -f2 | tr '\n' ' ' >&2
+            echo >&2
+            exit 1
+        fi
+    fi
+
+    echo "Instalando NeoForge ${NEO}"
+    fetch -o neoforge-installer.jar \
+        "https://maven.neoforged.net/releases/net/neoforged/neoforge/${NEO}/neoforge-${NEO}-installer.jar"
+    run_modloader_installer neoforge-installer.jar --installServer
+}
+
+# --- BungeeCord ------------------------------------------------------------
+# Published as a single jar on md-5's Jenkins; no versions to pick from.
+install_bungeecord() {
+    echo "Descargando BungeeCord (ultimo build estable)"
+    fetch -o "${JARFILE}" "https://ci.md-5.net/job/BungeeCord/lastSuccessfulBuild/artifact/bootstrap/target/BungeeCord.jar"
+}
+
 # --- Leaves ----------------------------------------------------------------
 # Paper fork with an API shaped like PaperMC's own v2.
 install_leaves() {
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
-        VERSION=$(fetch "https://api.leavesmc.org/v2/projects/leaves" | jq -r '.versions[-1]')
+        VERSION=$(fetch_meta "https://api.leavesmc.org/v2/projects/leaves" | jq -r '.versions[-1] // empty')
+        require_data "${VERSION}" "no se pudo determinar la ultima version de Leaves."
         echo "Ultima version de Leaves: ${VERSION}"
     fi
 
-    BUILD=$(fetch "https://api.leavesmc.org/v2/projects/leaves/versions/${VERSION}" | jq -r '.builds[-1]')
-    [ -z "${BUILD}" ] || [ "${BUILD}" = "null" ] && { echo "ERROR: no hay builds de Leaves para ${VERSION}." >&2; exit 1; }
+    BUILD=$(fetch_meta "https://api.leavesmc.org/v2/projects/leaves/versions/${VERSION}" | jq -r '.builds[-1] // empty')
+    require_data "${BUILD}" "no hay builds de Leaves para ${VERSION}."
 
-    NAME=$(fetch "https://api.leavesmc.org/v2/projects/leaves/versions/${VERSION}/builds/${BUILD}" \
-        | jq -r '.downloads.application.name')
+    META=$(fetch_meta "https://api.leavesmc.org/v2/projects/leaves/versions/${VERSION}/builds/${BUILD}")
+    NAME=$(echo "${META}" | jq -r '.downloads.application.name // empty')
+    SHA=$(echo "${META}" | jq -r '.downloads.application.sha256 // empty')
+    require_data "${NAME}" "no se pudo resolver la descarga de Leaves ${VERSION}."
 
     echo "Descargando Leaves ${VERSION} build ${BUILD}"
     fetch -o "${JARFILE}" "https://api.leavesmc.org/v2/projects/leaves/versions/${VERSION}/builds/${BUILD}/downloads/${NAME}"
+    verify_sha "${JARFILE}" "${SHA}" sha256
 }
 
 # --- Pufferfish ------------------------------------------------------------
 # Published on Jenkins, one job per Minecraft minor (Pufferfish-1.21, ...).
 install_pufferfish() {
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
-        JOB=$(fetch "https://ci.pufferfish.host/api/json?tree=jobs[name]" \
-            | jq -r '[.jobs[].name | select(test("^Pufferfish-[0-9]"))] | sort_by(split("-")[1] | split(".") | map(tonumber)) | last')
+        # Pufferfish-Purpur-* jobs also live here and must not be picked up,
+        # hence the digit right after the dash.
+        JOB=$(fetch_meta "https://ci.pufferfish.host/api/json?tree=jobs%5Bname%5D" \
+            | jq -r '[.jobs[].name | select(test("^Pufferfish-[0-9]"))] | sort_by(split("-")[1] | split(".") | map(tonumber)) | last // empty')
+        require_data "${JOB}" "no se pudo determinar la ultima version de Pufferfish."
     else
         # 1.21.4 lives in the Pufferfish-1.21 job.
         JOB="Pufferfish-$(echo "${VERSION}" | cut -d. -f1,2)"
     fi
     echo "Job de Pufferfish: ${JOB}"
 
-    ART=$(fetch "https://ci.pufferfish.host/job/${JOB}/lastSuccessfulBuild/api/json?tree=artifacts[relativePath]" \
-        | jq -r '.artifacts[0].relativePath')
-    [ -z "${ART}" ] || [ "${ART}" = "null" ] && { echo "ERROR: no se encontro artefacto en ${JOB}." >&2; exit 1; }
+    ART=$(fetch_meta "https://ci.pufferfish.host/job/${JOB}/lastSuccessfulBuild/api/json?tree=artifacts%5BrelativePath%5D" 2>/dev/null \
+        | jq -r '.artifacts[0].relativePath // empty')
+    if [ -z "${ART}" ]; then
+        echo "ERROR: Pufferfish no tiene builds para ${VERSION}." >&2
+        echo "Pufferfish solo publica algunas versiones de Minecraft; prueba con 'latest'." >&2
+        exit 1
+    fi
 
     echo "Descargando ${ART}"
     fetch -o "${JARFILE}" "https://ci.pufferfish.host/job/${JOB}/lastSuccessfulBuild/artifact/${ART}"
@@ -188,7 +505,7 @@ install_pufferfish() {
 # --- Mohist ----------------------------------------------------------------
 # Hybrid: runs Forge mods and Bukkit plugins at the same time.
 mohist_build_url() {
-    fetch "https://mohistmc.com/api/v2/projects/mohist/$1/builds" 2>/dev/null \
+    fetch_meta "https://mohistmc.com/api/v2/projects/mohist/$1/builds" 2>/dev/null \
         | jq -r '.builds[-1].originUrl // empty'
 }
 
@@ -196,7 +513,10 @@ install_mohist() {
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
         # Mohist lists versions that have no builds yet (1.21.4 at time of
         # writing), so walk backwards until one actually has a download.
-        for CANDIDATE in $(fetch "https://mohistmc.com/api/v2/projects/mohist" | jq -r '.versions | reverse | .[]'); do
+        VERSIONS=$(fetch_meta "https://mohistmc.com/api/v2/projects/mohist" | jq -r '.versions | reverse | .[]')
+        require_data "${VERSIONS}" "no se pudo consultar las versiones de Mohist."
+
+        for CANDIDATE in ${VERSIONS}; do
             URL=$(mohist_build_url "${CANDIDATE}")
             if [ -n "${URL}" ]; then
                 VERSION="${CANDIDATE}"
@@ -209,7 +529,10 @@ install_mohist() {
         URL=$(mohist_build_url "${VERSION}")
     fi
 
-    [ -z "${URL}" ] && { echo "ERROR: no hay builds de Mohist para ${VERSION}." >&2; exit 1; }
+    if [ -z "${URL}" ]; then
+        echo "ERROR: no hay builds de Mohist para ${VERSION}." >&2
+        exit 1
+    fi
 
     echo "Descargando Mohist ${VERSION}"
     fetch -o "${JARFILE}" "${URL}"
@@ -221,20 +544,31 @@ install_mohist() {
 # so the right release has to be searched for by asset name.
 install_arclight() {
     LOADER=$(echo "${ARCLIGHT_LOADER:-forge}" | tr '[:upper:]' '[:lower:]')
-    API="https://api.github.com/repos/IzzelAliz/Arclight/releases?per_page=100"
+
+    # Fetched once and reused. The GitHub API allows 60 unauthenticated requests
+    # per hour PER IP, which a busy node shares across every install running on
+    # it, so each extra call here is a real chance of a 403 later.
+    RELEASES=$(fetch_meta "https://api.github.com/repos/IzzelAliz/Arclight/releases?per_page=100" 2>/dev/null || true)
+
+    if [ -z "${RELEASES}" ] || [ "$(echo "${RELEASES}" | jq -r 'type')" != "array" ]; then
+        echo "ERROR: no se pudo consultar las versiones de Arclight en GitHub." >&2
+        echo "Causa habitual: el nodo agoto el limite de 60 consultas por hora que" >&2
+        echo "GitHub aplica por IP. Reintenta en unos minutos." >&2
+        exit 1
+    fi
 
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
-        URL=$(fetch "${API}" | jq -r --arg l "${LOADER}" \
+        URL=$(echo "${RELEASES}" | jq -r --arg l "${LOADER}" \
             '[.[].assets[] | select(.name | startswith("arclight-" + $l + "-"))][0].browser_download_url // empty')
     else
-        URL=$(fetch "${API}" | jq -r --arg l "${LOADER}" --arg v "${VERSION}" \
+        URL=$(echo "${RELEASES}" | jq -r --arg l "${LOADER}" --arg v "${VERSION}" \
             '[.[].assets[] | select(.name | startswith("arclight-" + $l + "-" + $v + "-"))][0].browser_download_url // empty')
     fi
 
     if [ -z "${URL}" ]; then
         echo "ERROR: no se encontro Arclight para ${LOADER} ${VERSION}." >&2
         echo "Versiones disponibles:" >&2
-        fetch "${API}" | jq -r --arg l "${LOADER}" \
+        echo "${RELEASES}" | jq -r --arg l "${LOADER}" \
             '[.[].assets[].name | select(startswith("arclight-" + $l + "-"))] | unique | .[]' >&2
         exit 1
     fi
@@ -248,6 +582,10 @@ case "${SOFTWARE}" in
     purpur)                         install_purpur ;;
     vanilla)                        install_vanilla ;;
     fabric)                         install_fabric ;;
+    quilt)                          install_quilt ;;
+    forge)                          install_forge ;;
+    neoforge)                       install_neoforge ;;
+    bungeecord)                     install_bungeecord ;;
     leaves)                         install_leaves ;;
     pufferfish)                     install_pufferfish ;;
     mohist)                         install_mohist ;;
@@ -255,15 +593,24 @@ case "${SOFTWARE}" in
     *)
         echo "ERROR: software desconocido '${SOFTWARE}'." >&2
         echo "Valores validos: paper, folia, purpur, pufferfish, leaves, vanilla," >&2
-        echo "                 fabric, mohist, arclight, velocity, waterfall, none" >&2
+        echo "                 fabric, quilt, forge, neoforge, mohist, arclight," >&2
+        echo "                 velocity, waterfall, bungeecord, none" >&2
         exit 1
         ;;
 esac
 
-if [ ! -s "${JARFILE}" ]; then
-    echo "ERROR: ${JARFILE} no existe o quedo vacio tras la descarga." >&2
-    exit 1
-fi
+# Forge, NeoForge and Quilt start from files the installer generated, not from a
+# jar this script placed, so the size check below does not apply to them.
+case "${SOFTWARE}" in
+    forge|neoforge|quilt) ;;
+    *)
+        if [ ! -s "${JARFILE}" ]; then
+            echo "ERROR: ${JARFILE} no existe o quedo vacio tras la descarga." >&2
+            exit 1
+        fi
+        echo "Se descargaron $(du -h "${JARFILE}" | cut -f1) en ${JARFILE}"
+        ;;
+esac
 
 # Hint for the entrypoint. Mohist and Arclight cannot be told apart from Forge
 # until they have booted once and written their own config files, so record
@@ -273,7 +620,7 @@ echo "${SOFTWARE}" > .multiversion-software
 
 # Proxies have no EULA and no server.properties.
 case "${SOFTWARE}" in
-    velocity|waterfall) ;;
+    velocity|waterfall|bungeecord) ;;
     *)
         # Unset counts as accepted, matching the entrypoint. Only an explicit
         # false/0 opts out.
@@ -290,5 +637,4 @@ case "${SOFTWARE}" in
         ;;
 esac
 
-echo "Se descargaron $(du -h "${JARFILE}" | cut -f1) en ${JARFILE}"
 echo "Instalacion completada."
