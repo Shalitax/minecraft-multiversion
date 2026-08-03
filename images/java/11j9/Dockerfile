@@ -37,5 +37,13 @@ USER        container
 ENV         USER=container HOME=/home/container
 WORKDIR     /home/container
 
+# Baked in at build time so a running container can identify itself in a
+# support ticket, even when the tag has not changed and Wings served a cached
+# image. Placed just before COPY so edits to the entrypoint do not invalidate
+# the apt layer above.
+ARG         BUILD_DATE=desconocida
+ARG         BUILD_REF=local
+ENV         MV_BUILD_DATE=${BUILD_DATE} MV_BUILD_REF=${BUILD_REF}
+
 COPY        entrypoint.sh /entrypoint.sh
 CMD         [ "/bin/bash", "/entrypoint.sh" ]

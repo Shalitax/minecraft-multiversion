@@ -33,6 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.img.outputs.image }}
+      version: ${{ steps.stamp.outputs.version }}
+      built: ${{ steps.stamp.outputs.built }}
     steps:
       - name: Build lowercase image name
         id: img
@@ -42,6 +44,16 @@ jobs:
           # set once.
           echo "image=ghcr.io/${owner}/minecraft-multiversion" >> "$GITHUB_OUTPUT"
           echo "Publishing to ghcr.io/${owner}/minecraft-multiversion"
+
+      # A moving tag alone leaves no way back: republishing java_21 overwrites
+      # the only copy. The dated tag below is never reused, so a bad release can
+      # be rolled back by pointing the panel at the previous one.
+      - name: Build version stamp
+        id: stamp
+        run: |
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          echo "version=$(date -u +%Y%m%d)-$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          echo "built=$(date -u +'%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
 
   # Fail fast on a shell error before spending ~20 minutes of build time.
   lint:
@@ -135,7 +147,13 @@ jobs:
           file: ./images/java/${{ matrix.tag }}/Dockerfile
           platforms: ${{ matrix.platforms }}
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ needs.prepare.outputs.image }}:java_${{ matrix.tag }}
+          # Moving tag for the panel, plus an immutable dated one for rollback.
+          tags: |
+            ${{ needs.prepare.outputs.image }}:java_${{ matrix.tag }}
+            ${{ needs.prepare.outputs.image }}:java_${{ matrix.tag }}-${{ needs.prepare.outputs.version }}
+          build-args: |
+            BUILD_DATE=${{ needs.prepare.outputs.built }}
+            BUILD_REF=${{ needs.prepare.outputs.version }}
           # Links the GHCR package back to this repository, so it inherits the
           # repo's access settings and shows a source link on the package page.
           labels: |

@@ -4,7 +4,7 @@
         "version": "PTDL_v2",
         "update_url": null
     },
-    "exported_at": "2026-08-02T05:06:33.882Z",
+    "exported_at": "2026-08-03T01:34:44.908Z",
     "name": "Minecraft Multiversión",
     "author": "support@hexservers.com",
     "description": "Un único egg para cualquier servidor de Minecraft Java. Al arrancar, el entrypoint del contenedor detecta si lo instalado es Vanilla, Paper, Purpur, Spigot, Forge, NeoForge, Fabric, Quilt, Velocity, BungeeCord o Waterfall, y arma el comando de inicio adecuado. Como la detección se basa en los archivos presentes, un módulo instalador externo puede cambiar el software cuando quiera sin tocar el egg. Añade opciones en el panel para server.properties (modo online, dificultad, distancia de renderizado y más), ajuste de la JVM, actualización automática opcional y validación previa al arranque. REQUIERE las imágenes Docker propias de este egg.",
@@ -80,12 +80,12 @@
         },
         {
             "name": "Tipo de servidor",
-            "description": "Con \"Automático\" el servidor detecta solo qué software tiene instalado, que es lo correcto casi siempre. Cambia esto solo si la detección falla.",
+            "description": "Con \"Automático\" el servidor detecta solo qué software tiene instalado, que es lo correcto casi siempre. Cambia esto solo si la detección falla. Usa forge-legacy para Forge anterior a 1.17, que arranca desde un único .jar.",
             "env_variable": "SERVER_TYPE_OVERRIDE",
             "default_value": "Automático",
             "user_viewable": true,
             "user_editable": true,
-            "rules": "required|string|in:Automático,vanilla,forge,neoforge,fabric,quilt,mohist,arclight,velocity,bungeecord",
+            "rules": "required|string|in:Automático,vanilla,forge,forge-legacy,neoforge,fabric,quilt,mohist,arclight,velocity,bungeecord",
             "field_type": "text"
         },
         {
@@ -262,6 +262,16 @@
             "name": "Semilla del mundo",
             "description": "Semilla que define cómo se genera el mundo. Solo tiene efecto al crear un mundo nuevo: si ya tienes uno, no cambia nada. Usa \"No modificar\" para dejarlo como está.",
             "env_variable": "MC_LEVEL_SEED",
+            "default_value": "No modificar",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:64",
+            "field_type": "text"
+        },
+        {
+            "name": "Nombre del mundo",
+            "description": "Carpeta donde se guarda el mundo (level-name). Cambiarlo hace que el servidor genere o cargue otro mundo distinto, sin borrar el anterior. Usa \"No modificar\" para dejar el actual.",
+            "env_variable": "MC_LEVEL_NAME",
             "default_value": "No modificar",
             "user_viewable": true,
             "user_editable": true,

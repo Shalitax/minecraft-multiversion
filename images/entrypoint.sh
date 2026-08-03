@@ -12,6 +12,11 @@
 
 cd /home/container || exit 1
 
+# Bumped by hand when this file changes in a way worth telling apart in a
+# support ticket. MV_BUILD_* are baked in by the Dockerfile at build time, so
+# a cached image can be identified even when the tag has not changed.
+MULTIVERSION_VERSION="1.0.0"
+
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
@@ -118,6 +123,7 @@ JAVA_MAJOR=$(echo "${JAVA_RAW}" | sed -e 's/^1\.//' -e 's/[.+-].*//')
 [ -z "${JAVA_MAJOR}" ] && JAVA_MAJOR=0
 
 log_info "Java ${JAVA_RAW} (version ${JAVA_MAJOR}) | Zona horaria ${TZ} | IP ${INTERNAL_IP}"
+log_info "Egg Multiversion v${MULTIVERSION_VERSION} | imagen ${MV_BUILD_DATE:-desconocida} ${MV_BUILD_REF:+(${MV_BUILD_REF})}"
 
 # HTTP client defaults. Fill v3 rejects requests without a descriptive
 # User-Agent, so every curl call in this script goes through these.
@@ -268,6 +274,7 @@ apply_properties() {
 
     # Free text: whatever the user typed goes in as-is.
     set_prop "motd"       "${MC_MOTD}"
+    set_prop "level-name" "${MC_LEVEL_NAME}"
     set_prop "level-seed" "${MC_LEVEL_SEED}"
 
     # Not exposed in the egg to keep the panel short, but still honoured if an
@@ -625,9 +632,20 @@ print_diagnostics() {
     [ "${plugins}" -gt 0 ] && printf '  Plugins     : %s\n' "${plugins}"
     [ "${mods}" -gt 0 ] && printf '  Mods        : %s\n' "${mods}"
 
+    local free_mb
+    free_mb=$(df -Pm /home/container 2>/dev/null | awk 'NR==2 {print $4}')
+    [ -n "${free_mb}" ] && printf '  Disco libre : %s MB
+' "${free_mb}"
+
     local vd=""
     [ -f server.properties ] && vd=$(grep -E '^view-distance=' server.properties 2>/dev/null | cut -d= -f2)
     [ -n "${vd}" ] && printf '  Distancia   : %s chunks\n' "${vd}"
+
+    # Running out of disk mid-save corrupts chunks, so this is worth flagging
+    # before it happens rather than after.
+    if [ -n "${free_mb}" ] && [ "${free_mb}" -lt 512 ] 2>/dev/null; then
+        log_warn "Solo quedan ${free_mb} MB libres. El servidor puede fallar al guardar el mundo."
+    fi
 
     # --- Memory warnings ---------------------------------------------------
     # Thresholds are deliberately loose: the goal is to catch the obviously
@@ -664,6 +682,36 @@ print_diagnostics() {
 
 STATE_FILE=".multiversion-update"
 
+# Checks a download against the hash the API published for it. A truncated or
+# corrupted jar otherwise fails later as an unreadable Java error, which is far
+# harder to diagnose than "the download does not match".
+# No hash available means no check: not every project publishes one.
+verify_checksum() {
+    local file="$1" expected="$2" algo="${3:-sha256}" actual
+
+    [ -z "${expected}" ] && return 0
+    [ "${expected}" = "null" ] && return 0
+
+    case "${algo}" in
+        sha1) actual=$(sha1sum "${file}" 2>/dev/null | awk '{print $1}') ;;
+        *)    actual=$(sha256sum "${file}" 2>/dev/null | awk '{print $1}') ;;
+    esac
+
+    if [ -z "${actual}" ]; then
+        log_warn "No se pudo calcular el hash de la descarga, se omite la comprobacion"
+        return 0
+    fi
+
+    if [ "${actual}" != "${expected}" ]; then
+        log_error "La descarga esta corrupta: el hash no coincide con el publicado."
+        log_error "Se conserva la version anterior."
+        return 1
+    fi
+
+    log_info "Integridad de la descarga verificada (${algo})"
+    return 0
+}
+
 # Resolves the newest Minecraft version for a PaperMC project. The v3 endpoint
 # returns versions grouped by family, newest family first.
 #
@@ -687,7 +735,7 @@ paper_latest_build() {
         | jq -r --arg ch "${channel}" '
             ( [ .[] | select(.channel == $ch) ][0] // .[0] ) as $b
             | if $b == null then empty
-              else "\($b.id) \($b.downloads["server:default"].url)"
+              else "\($b.id) \($b.downloads["server:default"].url) \($b.downloads["server:default"].checksums.sha256 // "")"
               end'
 }
 
@@ -703,8 +751,7 @@ update_paper_family() {
     result=$(paper_latest_build "${project}" "${version}" "${channel}")
     [ -z "${result}" ] && { log_warn "No hay builds de ${project} para ${version}, se omite"; return 1; }
 
-    build=${result%% *}
-    url=${result#* }
+    read -r build url sha <<< "${result}"
 
     local marker="${project}-${version}-${build}"
     if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "${marker}" ] && [ -f "${SERVER_JARFILE}" ]; then
@@ -714,6 +761,10 @@ update_paper_family() {
 
     log_info "Descargando ${project} ${version} build ${build}"
     if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" "${url}"; then
+        if ! verify_checksum "${SERVER_JARFILE}.tmp" "${sha}" sha256; then
+            rm -f "${SERVER_JARFILE}.tmp"
+            return 1
+        fi
         mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
         echo "${marker}" > "${STATE_FILE}"
         log_ok "Actualizado a ${project} ${version} build ${build}"
@@ -772,14 +823,20 @@ update_leaves() {
         return 0
     fi
 
-    local name
-    name=$(curl "${CURL_OPTS[@]}" "https://api.leavesmc.org/v2/projects/leaves/versions/${version}/builds/${build}" 2>/dev/null \
-        | jq -r '.downloads.application.name // empty')
+    # One request, both fields: the name for the URL and the hash to verify it.
+    local meta name sha
+    meta=$(curl "${CURL_OPTS[@]}" "https://api.leavesmc.org/v2/projects/leaves/versions/${version}/builds/${build}" 2>/dev/null)
+    name=$(echo "${meta}" | jq -r '.downloads.application.name // empty')
+    sha=$(echo "${meta}" | jq -r '.downloads.application.sha256 // empty')
     [ -z "${name}" ] && { log_warn "No se pudo resolver la descarga de Leaves, se omite"; return 1; }
 
     log_info "Descargando Leaves ${version} build ${build}"
     if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" \
         "https://api.leavesmc.org/v2/projects/leaves/versions/${version}/builds/${build}/downloads/${name}"; then
+        if ! verify_checksum "${SERVER_JARFILE}.tmp" "${sha}" sha256; then
+            rm -f "${SERVER_JARFILE}.tmp"
+            return 1
+        fi
         mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
         echo "${marker}" > "${STATE_FILE}"
         log_ok "Actualizado a Leaves ${version} build ${build}"
@@ -850,11 +907,19 @@ update_vanilla() {
     version_url=$(echo "${json}" | jq -r --arg v "${version}" '.versions[] | select(.id == $v) | .url')
     [ -z "${version_url}" ] && { log_warn "No existe la version de Vanilla ${version}, se omite"; return 1; }
 
-    download_url=$(curl "${CURL_OPTS[@]}" "${version_url}" 2>/dev/null | jq -r '.downloads.server.url // empty')
+    # One request, both fields. Mojang publishes sha1 rather than sha256.
+    local meta sha
+    meta=$(curl "${CURL_OPTS[@]}" "${version_url}" 2>/dev/null)
+    download_url=$(echo "${meta}" | jq -r '.downloads.server.url // empty')
+    sha=$(echo "${meta}" | jq -r '.downloads.server.sha1 // empty')
     [ -z "${download_url}" ] && { log_warn "Vanilla ${version} no tiene archivo de servidor, se omite"; return 1; }
 
     log_info "Descargando Vanilla ${version}"
     if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" "${download_url}"; then
+        if ! verify_checksum "${SERVER_JARFILE}.tmp" "${sha}" sha1; then
+            rm -f "${SERVER_JARFILE}.tmp"
+            return 1
+        fi
         mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
         echo "${marker}" > "${STATE_FILE}"
         log_ok "Actualizado a Vanilla ${version}"
