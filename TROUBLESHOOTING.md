@@ -16,12 +16,31 @@ Los mensajes llevan prefijo según gravedad:
 
 ## Lo primero que hay que pedir siempre
 
-Las dos primeras líneas de la consola identifican el entorno:
+Todo el arranque se muestra **de golpe, en un solo bloque**, justo antes de que
+el servidor tome el control. Mientras se hacen las comprobaciones solo se ve:
+
+```
+[i] Preparando el servidor...
+```
+
+Eso es normal, no es un cuelgue: hay consultas de red por medio. Después la
+consola se limpia y aparece el bloque completo, que se queda 5 segundos en
+pantalla antes de que el servidor empiece a escribir.
+
+Las dos primeras líneas del bloque identifican el entorno:
 
 ```
 [i] Java 21.0.5 (version 21) | Zona horaria UTC | IP 172.18.0.5
-[i] Egg Multiversion v1.1.0 | imagen 2026-08-03 01:34 UTC (20260803-a1b2c3d)
+[i] Egg Multiversion v1.2.0 | imagen 2026-08-03 01:34 UTC (20260803-a1b2c3d)
 ```
+
+> **Antes de reiniciar un servidor que falló, copia el error.** La limpieza de
+> consola borra también lo del arranque anterior. Se controla con **Limpiar la
+> consola al arrancar**; ponla en `0` si estás diagnosticando algo.
+>
+> Si necesitas ver el progreso en vivo (por ejemplo, para saber en qué paso se
+> atasca un arranque lento), pon **Log de inicio en un solo bloque** en `0` y
+> los mensajes vuelven a salir uno a uno.
 
 Sin eso no se puede diagnosticar nada: **Wings cachea las imágenes**, así que
 un servidor puede estar corriendo código de hace semanas aunque se haya
@@ -265,6 +284,44 @@ simplemente dejan de recibir actualizaciones.
 
 **Respuesta:** ninguna. Si persiste días, avisar al equipo técnico.
 
+### `[!] No se pudo consultar Gale en GitHub (limite de consultas por IP), se omite`
+
+Gale se distribuye por releases de GitHub, que permite 60 consultas por hora y
+por IP, compartidas por todo el nodo. **El servidor arranca igual** con el jar
+que ya tenía.
+
+**Respuesta:** ninguna si es esporádico. Si pasa constantemente, es que hay
+muchos servidores de Gale o Arclight con actualización automática en el mismo
+nodo; desactivarla en algunos lo resuelve.
+
+---
+
+## Softwares con particularidades
+
+### Sponge
+
+**No admite plugins de Spigot, Paper ni Bukkit.** Tiene su propio ecosistema de
+plugins, incompatible con el resto. Es el malentendido número uno: el cliente
+sube sus plugins de siempre y ninguno carga.
+
+**Respuesta:** o busca equivalentes para Sponge, o cambia a Paper.
+
+### NanoLimbo
+
+No es un servidor de Minecraft completo: es una sala de espera para redes con
+proxy. **No tiene EULA, ni `server.properties`, ni mundos.** Se configura entero
+en `settings.yml`.
+
+En el primer arranque todavía no existe ese archivo, así que usa su puerto por
+defecto. **Al reiniciar una vez** queda apuntando al puerto asignado. Lo mismo
+pasa con Velocity, BungeeCord y Waterfall.
+
+### Leaf y Gale
+
+Forks de Paper: admiten los mismos plugins y las mismas configuraciones. Si un
+cliente reporta un problema raro con plugins, probar con Paper a secas descarta
+que sea cosa del fork.
+
 ---
 
 ## Configuración
@@ -309,6 +366,16 @@ Sale siempre que Geyser está activado, como recordatorio.
 
 **Si los jugadores de Bedrock no conectan** aunque el plugin cargue, es esto
 casi seguro: falta asignar el puerto UDP al servidor desde el nodo.
+
+### `[!] Geyser no funciona en 'vanilla': ese software no carga plugins de Bukkit`
+
+Sale con Vanilla puro, Sponge y NanoLimbo. Geyser es un **plugin de Bukkit** y
+esos tres no tienen dónde cargarlo. Antes el jar se copiaba igualmente a
+`plugins/` y no pasaba nada: la opción decía "activado" y los jugadores de
+Bedrock simplemente no entraban, sin ningún error.
+
+**Respuesta:** cambiar a Paper o un fork suyo, o poner un proxy (Velocity)
+delante y activar Geyser en el proxy.
 
 ### `[!] Geyser no es compatible con 'forge', se omite`
 

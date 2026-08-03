@@ -15,7 +15,7 @@ cd /home/container || exit 1
 # Bumped by hand when this file changes in a way worth telling apart in a
 # support ticket. MV_BUILD_* are baked in by the Dockerfile at build time, so
 # a cached image can be identified even when the tag has not changed.
-MULTIVERSION_VERSION="1.1.0"
+MULTIVERSION_VERSION="1.2.0"
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -28,10 +28,49 @@ C_ERR=$'\033[1;31m'
 C_OK=$'\033[1;32m'
 C_PROMPT=$'\033[1;33m'
 
-log_info()  { echo "${C_INFO}[i]${C_RESET} $*"; }
-log_warn()  { echo "${C_WARN}[!]${C_RESET} $*"; }
-log_error() { echo "${C_ERR}[x]${C_RESET} $*"; }
-log_ok()    { echo "${C_OK}[+]${C_RESET} $*"; }
+# Startup output is queued and written as a single block right before the server
+# takes over, instead of trickling out as each check finishes.
+#
+# The reason is what happens next: the server's own startup flood arrives
+# immediately, and on a modpack that is thousands of lines. Anything printed
+# progressively is scrolled out of reach before the customer can read it, which
+# is why "the console said something but it scrolled away" is such a common
+# ticket. One block, printed last, survives.
+MV_LOG_BUFFER=""
+MV_BUFFERING=0
+
+# Queues a line, or prints it, depending on the mode.
+out() {
+    if [ "${MV_BUFFERING}" = "1" ]; then
+        MV_LOG_BUFFER="${MV_LOG_BUFFER}$*"$'\n'
+    else
+        printf '%s\n' "$*"
+    fi
+}
+
+# Same, for text that already carries its own line breaks.
+out_raw() {
+    if [ "${MV_BUFFERING}" = "1" ]; then
+        MV_LOG_BUFFER="${MV_LOG_BUFFER}$*"
+    else
+        printf '%s' "$*"
+    fi
+}
+
+# Writes whatever is queued and empties the queue. Called explicitly before
+# exec, and from an EXIT trap so a failure on the way never swallows the very
+# message that explains it.
+flush_log() {
+    if [ -n "${MV_LOG_BUFFER}" ]; then
+        printf '%s' "${MV_LOG_BUFFER}"
+        MV_LOG_BUFFER=""
+    fi
+}
+
+log_info()  { out "${C_INFO}[i]${C_RESET} $*"; }
+log_warn()  { out "${C_WARN}[!]${C_RESET} $*"; }
+log_error() { out "${C_ERR}[x]${C_RESET} $*"; }
+log_ok()    { out "${C_OK}[+]${C_RESET} $*"; }
 
 # Lowercases and strips Spanish accents, so a panel label can be written with
 # or without them and still match. A mojibaked value simply fails to match and
@@ -105,6 +144,46 @@ map_gamemode() {
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
+
+# Buffering is decided here, before the first log line is produced. The trap
+# covers every early exit; it does NOT fire on exec, so the flush before
+# handing over to the server has to be explicit.
+if is_true "${STARTUP_SUMMARY:-1}"; then
+    MV_BUFFERING=1
+    trap flush_log EXIT
+    # Printed unbuffered on purpose: the checks below make network calls and can
+    # take a few seconds, and a console that stays completely blank reads as a
+    # server that hung on boot.
+    printf '%s\n' "${C_INFO}[i]${C_RESET} Preparando el servidor..."
+fi
+
+# Empties the visible console and its scrollback. Only meaningful together with
+# the buffered block: on its own it would wipe output already on screen.
+console_clear() {
+    [ "${MV_BUFFERING}" = "1" ] || return 0
+    is_true "${CONSOLE_CLEAR:-1}" || return 0
+    # Cursor home, erase screen, erase scrollback. Pterodactyl's console is
+    # xterm.js, which honours all three.
+    printf '\033[H\033[2J\033[3J'
+}
+
+# Holds the finished block on screen before the server's own output buries it.
+startup_pause() {
+    local secs="${STARTUP_PAUSE:-5}"
+
+    # A non-numeric value falls back to the default rather than aborting: this
+    # runs after every check has passed, and refusing to boot over a mistyped
+    # cosmetic setting would be absurd.
+    case "${secs}" in
+        ''|*[!0-9]*) secs=5 ;;
+    esac
+    [ "${secs}" -eq 0 ] && return 0
+    # Capped: this delay is paid on every single restart.
+    [ "${secs}" -gt 30 ] && secs=30
+
+    printf '%s\n' "${C_INFO}[i]${C_RESET} Arrancando en ${secs}s..."
+    sleep "${secs}"
+}
 
 TZ=${TZ:-UTC}
 export TZ
@@ -200,7 +279,7 @@ detect_server_type() {
         SERVER_TYPE="mohist"
     elif [ -f "arclight.conf" ] || [ -d "arclight" ]; then
         SERVER_TYPE="arclight"
-    elif [ -f ".multiversion-software" ] && grep -qE '^(mohist|arclight|velocity|waterfall|bungeecord)$' .multiversion-software 2>/dev/null; then
+    elif [ -f ".multiversion-software" ] && grep -qE '^(mohist|arclight|velocity|waterfall|bungeecord|nanolimbo)$' .multiversion-software 2>/dev/null; then
         # First boot: the software has not written its config files yet, so fall
         # back to what the installer recorded.
         #
@@ -230,8 +309,11 @@ detect_server_type() {
         SERVER_TYPE="vanilla"
     fi
 
+    # IS_PROXY really means "does not run Minecraft itself": no EULA, no
+    # server.properties, and no 'nogui' argument to reject. NanoLimbo is a limbo
+    # server rather than a proxy, but it has exactly that shape.
     case "${SERVER_TYPE}" in
-        velocity|bungeecord|waterfall) IS_PROXY=1 ;;
+        velocity|bungeecord|waterfall|nanolimbo) IS_PROXY=1 ;;
         *) IS_PROXY=0 ;;
     esac
 
@@ -361,6 +443,22 @@ apply_proxy_config() {
                 fi
             fi
             ;;
+        nanolimbo)
+            # settings.yml nests the port under bind, and 'port:' also appears
+            # elsewhere in that file. yq addresses the exact key, which sed
+            # cannot do without guessing at indentation.
+            if [ -f settings.yml ]; then
+                if yq -i ".bind.port = ${SERVER_PORT} | .bind.ip = \"0.0.0.0\"" settings.yml 2>/dev/null; then
+                    log_info "settings.yml: bind = 0.0.0.0:${SERVER_PORT}"
+                else
+                    log_warn "No se pudo ajustar el puerto en settings.yml. Revisalo a mano."
+                fi
+            else
+                log_warn "Primer arranque de NanoLimbo: aun no existe settings.yml."
+                log_warn "Arrancara en su puerto por defecto. Reinicia una vez y quedara"
+                log_warn "configurado en el puerto ${SERVER_PORT} que tiene asignado."
+            fi
+            ;;
     esac
 }
 
@@ -426,12 +524,24 @@ optimize_configs() {
         return 0
     fi
 
+    # Pure Vanilla and Sponge both detect as "vanilla" exactly like every Paper
+    # fork does, but neither will ever create bukkit.yml or spigot.yml. Asking
+    # the installer's marker settles it outright, instead of guessing forever.
+    if [ -f .multiversion-software ] \
+        && grep -qE '^(vanilla|sponge)$' .multiversion-software 2>/dev/null; then
+        if [ ! -f "${OPTIMIZE_MARKER}" ]; then
+            echo "${OPTIMIZE_PRESET_VERSION}" > "${OPTIMIZE_MARKER}"
+            log_info "Configuracion optimizada: este software no usa configs de Bukkit, se omite"
+        fi
+        return 0
+    fi
+
     # These files only exist after the server has booted at least once.
     if [ ! -f bukkit.yml ] && [ ! -f spigot.yml ]; then
-        # A pure Vanilla server detects as "vanilla" exactly like every Paper
-        # fork does, but it will never create these files. Without this branch
-        # it printed "se aplicara en el proximo arranque" on every single boot,
-        # forever, for a promise that could never be kept.
+        # Fallback for servers with no marker, e.g. placed by an external
+        # installer module. Without this it printed "se aplicara en el proximo
+        # arranque" on every single boot, forever, for a promise that could
+        # never be kept.
         if [ -f server.properties ] && [ ! -f version_history.json ] && [ ! -d plugins ]; then
             echo "${OPTIMIZE_PRESET_VERSION}" > "${OPTIMIZE_MARKER}"
             log_info "Configuracion optimizada: este servidor no usa configs de Bukkit, no se volvera a comprobar"
@@ -489,6 +599,20 @@ optimize_configs() {
 
 install_geyser() {
     is_true "${INSTALL_GEYSER}" || return 0
+
+    # Pure Vanilla, Sponge and NanoLimbo all look like SERVER_TYPE "vanilla" or
+    # have no plugin loader Geyser can hook into, so the installer's marker is
+    # what settles it. Without this the jar was dropped into plugins/ where
+    # nothing ever loaded it, and the customer got no error at all: the option
+    # said "activado" and Bedrock players simply could not connect.
+    local mv_software=""
+    [ -f .multiversion-software ] && mv_software=$(cat .multiversion-software)
+    case "${mv_software}" in
+        vanilla|sponge|nanolimbo)
+            log_warn "Geyser no funciona en '${mv_software}': ese software no carga plugins de Bukkit."
+            log_warn "Usa Paper o un fork suyo, o pon un proxy (Velocity) delante y activalo alli."
+            return 0 ;;
+    esac
 
     # Each platform needs its own build of the plugin. Geyser ships builds for
     # Fabric and NeoForge as well; Floodgate does not, so those two get Geyser
@@ -654,9 +778,9 @@ scan_client_mods() {
 
     [ "${found}" -eq 0 ] && return 0
 
-    echo
+    out ""
     log_warn "Se detectaron ${found} mod(s) que solo funcionan en el cliente:"
-    printf '%s' "${names}"
+    out_raw "${names}"
     log_warn "Estos mods no existen en la version de servidor y suelen impedir que arranque."
 
     case "${action}" in
@@ -675,7 +799,7 @@ scan_client_mods() {
             log_warn "Accion configurada: solo avisar. Borralos o muevelos fuera de mods/ para continuar."
             ;;
     esac
-    echo
+    out ""
 }
 
 # ---------------------------------------------------------------------------
@@ -689,21 +813,21 @@ print_diagnostics() {
     [ -d plugins ] && plugins=$(ls -1 plugins/*.jar 2>/dev/null | wc -l)
     [ -d mods ] && mods=$(ls -1 mods/*.jar 2>/dev/null | wc -l)
 
-    echo
-    echo "${C_INFO}--- Resumen del servidor ---${C_RESET}"
-    printf '  Software    : %s\n' "${SERVER_TYPE}"
-    printf '  Java        : %s (version %s)\n' "${JAVA_RAW}" "${JAVA_MAJOR}"
+    out ""
+    out "${C_INFO}--- Resumen del servidor ---${C_RESET}"
+    out "  Software    : ${SERVER_TYPE}"
+    out "  Java        : ${JAVA_RAW} (version ${JAVA_MAJOR})"
     if [ -z "${SERVER_MEMORY}" ] || [ "${SERVER_MEMORY}" = "0" ]; then
-        printf '  Memoria     : sin limite asignado\n'
+        out "  Memoria     : sin limite asignado"
     else
-        printf '  Memoria     : %s MB asignados\n' "${SERVER_MEMORY}"
+        out "  Memoria     : ${SERVER_MEMORY} MB asignados"
     fi
-    [ "${plugins}" -gt 0 ] && printf '  Plugins     : %s\n' "${plugins}"
-    [ "${mods}" -gt 0 ] && printf '  Mods        : %s\n' "${mods}"
+    [ "${plugins}" -gt 0 ] && out "  Plugins     : ${plugins}"
+    [ "${mods}" -gt 0 ] && out "  Mods        : ${mods}"
 
     local vd=""
     [ -f server.properties ] && vd=$(grep -E '^view-distance=' server.properties 2>/dev/null | cut -d= -f2)
-    [ -n "${vd}" ] && printf '  Distancia   : %s chunks\n' "${vd}"
+    [ -n "${vd}" ] && out "  Distancia   : ${vd} chunks"
 
     # --- Memory warnings ---------------------------------------------------
     # Thresholds are deliberately loose: the goal is to catch the obviously
@@ -728,8 +852,8 @@ print_diagnostics() {
         fi
     fi
 
-    echo "${C_INFO}----------------------------${C_RESET}"
-    echo
+    out "${C_INFO}----------------------------${C_RESET}"
+    out ""
 }
 
 # ---------------------------------------------------------------------------
@@ -875,6 +999,98 @@ update_purpur() {
     fi
 }
 
+# Leaf has its own API, shaped like PaperMC's v2.
+update_leaf() {
+    local version="$1"
+
+    if is_auto "${version}" || [ "${version}" = "latest" ]; then
+        version=$(curl "${CURL_META[@]}" "https://api.leafmc.one/v2/projects/leaf" 2>/dev/null | jq -r '.versions[-1] // empty')
+        [ -z "${version}" ] && { log_warn "No se pudo determinar la ultima version de Leaf, se omite"; return 1; }
+    fi
+
+    local build
+    build=$(curl "${CURL_META[@]}" "https://api.leafmc.one/v2/projects/leaf/versions/${version}" 2>/dev/null | jq -r '.builds[-1] // empty')
+    [ -z "${build}" ] && { log_warn "No hay builds de Leaf para ${version}, se omite"; return 1; }
+
+    local marker="leaf-${version}-${build}"
+    if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "${marker}" ] && [ -f "${SERVER_JARFILE}" ]; then
+        log_ok "Leaf ${version} build ${build} ya esta actualizado"
+        return 0
+    fi
+
+    # One request, both fields: the name for the URL and the hash to verify it.
+    local meta name sha
+    meta=$(curl "${CURL_META[@]}" "https://api.leafmc.one/v2/projects/leaf/versions/${version}/builds/${build}" 2>/dev/null)
+    name=$(echo "${meta}" | jq -r '.downloads.primary.name // empty')
+    sha=$(echo "${meta}" | jq -r '.downloads.primary.sha256 // empty')
+    [ -z "${name}" ] && { log_warn "No se pudo resolver la descarga de Leaf, se omite"; return 1; }
+
+    log_info "Descargando Leaf ${version} build ${build}"
+    if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" \
+        "https://api.leafmc.one/v2/projects/leaf/versions/${version}/builds/${build}/downloads/${name}"; then
+        if ! verify_checksum "${SERVER_JARFILE}.tmp" "${sha}" sha256; then
+            rm -f "${SERVER_JARFILE}.tmp"
+            return 1
+        fi
+        mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
+        echo "${marker}" > "${STATE_FILE}"
+        log_ok "Actualizado a Leaf ${version} build ${build}"
+    else
+        rm -f "${SERVER_JARFILE}.tmp"
+        log_error "Fallo la descarga, se mantiene el jar actual"
+        return 1
+    fi
+}
+
+# Gale publishes on GitHub, whose API allows 60 unauthenticated requests per
+# hour per IP. That budget is shared by every server on the node, so this one
+# treats a rate-limit answer as "skip and keep running", never as an error.
+update_gale() {
+    local version="$1" releases result
+
+    releases=$(curl "${CURL_META[@]}" "https://api.github.com/repos/GaleMC/Gale/releases?per_page=100" 2>/dev/null)
+    if [ -z "${releases}" ] || [ "$(echo "${releases}" | jq -r 'type' 2>/dev/null)" != "array" ]; then
+        log_warn "No se pudo consultar Gale en GitHub (limite de consultas por IP), se omite"
+        return 1
+    fi
+
+    local prefix="gale-"
+    if ! is_auto "${version}" && [ "${version}" != "latest" ]; then
+        prefix="gale-${version}-"
+    fi
+
+    result=$(echo "${releases}" | jq -r --arg p "${prefix}" '
+        [ .[].assets[] | select(.name | startswith($p)) ][0]
+        | if . == null then empty
+          else "\(.name) \(.browser_download_url) \((.digest // "") | sub("^sha256:";""))" end')
+    [ -z "${result}" ] && { log_warn "No hay builds de Gale para ${version}, se omite"; return 1; }
+
+    local name url sha
+    read -r name url sha <<< "${result}"
+
+    # The asset file name carries the build, so it doubles as the state marker.
+    local marker="gale-${name}"
+    if [ -f "${STATE_FILE}" ] && [ "$(cat "${STATE_FILE}")" = "${marker}" ] && [ -f "${SERVER_JARFILE}" ]; then
+        log_ok "Gale ${name} ya esta actualizado"
+        return 0
+    fi
+
+    log_info "Descargando ${name}"
+    if curl "${CURL_OPTS[@]}" -o "${SERVER_JARFILE}.tmp" "${url}"; then
+        if ! verify_checksum "${SERVER_JARFILE}.tmp" "${sha}" sha256; then
+            rm -f "${SERVER_JARFILE}.tmp"
+            return 1
+        fi
+        mv "${SERVER_JARFILE}.tmp" "${SERVER_JARFILE}"
+        echo "${marker}" > "${STATE_FILE}"
+        log_ok "Actualizado a ${name}"
+    else
+        rm -f "${SERVER_JARFILE}.tmp"
+        log_error "Fallo la descarga, se mantiene el jar actual"
+        return 1
+    fi
+}
+
 # Pufferfish publishes on Jenkins, one job per Minecraft minor.
 update_pufferfish() {
     local version="$1" job
@@ -1000,6 +1216,8 @@ detect_fork_name() {
     case "${current}" in
         *purpur*)     echo "purpur" ;;
         *pufferfish*) echo "pufferfish" ;;
+        *leaf*)       echo "leaf" ;;
+        *gale*)       echo "gale" ;;
         *folia*)      echo "folia" ;;
         *paper*)      echo "paper" ;;
         *)            return 1 ;;
@@ -1009,8 +1227,9 @@ detect_fork_name() {
 marker_matches_type() {
     local fork
     case "$1" in
-        # Every Paper fork, plus Spigot, is a plain jar and detects as "vanilla".
-        paper|purpur|pufferfish|folia|spigot|vanilla)
+        # Every Paper fork, plus Spigot and Sponge, is a plain jar and detects
+        # as "vanilla".
+        paper|purpur|pufferfish|leaf|gale|folia|spigot|sponge|vanilla)
             [ "${SERVER_TYPE}" = "vanilla" ] || return 1
             # Same family, but possibly a different fork than the one recorded.
             if fork=$(detect_fork_name); then
@@ -1027,6 +1246,7 @@ marker_matches_type() {
         neoforge)   [ "${SERVER_TYPE}" = "neoforge" ] ;;
         mohist)     [ "${SERVER_TYPE}" = "mohist" ] ;;
         arclight)   [ "${SERVER_TYPE}" = "arclight" ] ;;
+        nanolimbo)  [ "${SERVER_TYPE}" = "nanolimbo" ] ;;
         *)          return 1 ;;
     esac
 }
@@ -1074,6 +1294,10 @@ run_auto_update() {
             update_paper_family "${project}" "${UPDATE_MC_VERSION}" "${UPDATE_CHANNEL:-STABLE}" ;;
         purpur)
             update_purpur "${UPDATE_MC_VERSION}" ;;
+        leaf)
+            update_leaf "${UPDATE_MC_VERSION}" ;;
+        gale)
+            update_gale "${UPDATE_MC_VERSION}" ;;
         pufferfish)
             update_pufferfish "${UPDATE_MC_VERSION}" ;;
         vanilla)
@@ -1083,6 +1307,9 @@ run_auto_update() {
         spigot)
             log_warn "Spigot no se puede actualizar solo: hay que recompilarlo con BuildTools."
             log_warn "Reinstala desde el panel para cambiar de version." ;;
+        sponge|nanolimbo)
+            log_warn "'${project}' no tiene actualizacion automatica en este egg."
+            log_warn "Reinstala desde el panel para pasar a una version nueva." ;;
         mohist|arclight|fabric|quilt|forge|neoforge)
             log_warn "'${project}' no se puede actualizar solo: hay que regenerar sus librerias."
             log_warn "Reinstala desde el panel para cambiar de version." ;;
@@ -1383,11 +1610,21 @@ STARTUP_MODE=$(echo "${STARTUP_MODE:-auto}" | tr '[:upper:]' '[:lower:]')
 
 if [ "${STARTUP_MODE}" = "manual" ]; then
     build_command_manual
-    printf '%s~ %s%s\n' "${C_PROMPT}container@pterodactyl" "${C_RESET}" "${MANUAL_CMD}"
-    # shellcheck disable=SC2086
-    exec env ${MANUAL_CMD}
+    out "${C_PROMPT}container@pterodactyl~ ${C_RESET}${MANUAL_CMD}"
 else
     build_command
-    printf '%s~ %s%s\n' "${C_PROMPT}container@pterodactyl" "${C_RESET}" "${CMD[*]}"
-    exec "${CMD[@]}"
+    out "${C_PROMPT}container@pterodactyl~ ${C_RESET}${CMD[*]}"
 fi
+
+# Everything above only queued output. This is where it reaches the screen:
+# wipe first, then write the whole block, then hold it there long enough to be
+# read before the server's own logs start scrolling.
+console_clear
+flush_log
+startup_pause
+
+if [ "${STARTUP_MODE}" = "manual" ]; then
+    # shellcheck disable=SC2086
+    exec env ${MANUAL_CMD}
+fi
+exec "${CMD[@]}"

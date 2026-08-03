@@ -553,6 +553,154 @@ install_bungeecord() {
     fetch -o "${JARFILE}" "https://ci.md-5.net/job/BungeeCord/lastSuccessfulBuild/artifact/bootstrap/target/BungeeCord.jar"
 }
 
+# --- GitHub releases helpers -----------------------------------------------
+# Shared by Arclight, Gale and NanoLimbo. GitHub allows 60 unauthenticated
+# requests per hour PER IP, and a whole node shares that IP, so every one of
+# these projects is fetched exactly once per install and reused.
+github_releases() {
+    RELEASES=$(fetch_meta "https://api.github.com/repos/$1/releases?per_page=100" 2>/dev/null || true)
+
+    if [ -z "${RELEASES}" ] || [ "$(echo "${RELEASES}" | jq -r 'type' 2>/dev/null)" != "array" ]; then
+        echo "ERROR: no se pudo consultar las versiones de ${SOFTWARE} en GitHub." >&2
+        echo "Causa habitual: el nodo agoto el limite de 60 consultas por hora que" >&2
+        echo "GitHub aplica por IP. Reintenta en unos minutos." >&2
+        exit 1
+    fi
+}
+
+# Prints "<url> <sha256>" for the newest asset whose name starts with $1.
+# Releases come newest first, so the first match is the newest build.
+# GitHub publishes the digest as "sha256:<hex>", hence the prefix strip.
+github_asset() {
+    echo "${RELEASES}" | jq -r --arg p "$1" '
+        [ .[].assets[] | select(.name | startswith($p)) ][0]
+        | if . == null then empty
+          else "\(.browser_download_url) \((.digest // "") | sub("^sha256:";""))" end'
+}
+
+# --- Leaf ------------------------------------------------------------------
+# Paper fork with its own API, shaped like PaperMC's v2. Being self-hosted, it
+# does not eat into the GitHub rate limit.
+install_leaf() {
+    if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
+        VERSION=$(fetch_meta "https://api.leafmc.one/v2/projects/leaf" | jq -r '.versions[-1] // empty')
+        require_data "${VERSION}" "no se pudo determinar la ultima version de Leaf."
+        echo "Ultima version de Leaf: ${VERSION}"
+    fi
+
+    BUILD=$(fetch_meta "https://api.leafmc.one/v2/projects/leaf/versions/${VERSION}" | jq -r '.builds[-1] // empty')
+    require_data "${BUILD}" "Leaf no publica builds para la version ${VERSION}."
+
+    # One request, both fields: the file name for the URL and its hash.
+    META=$(fetch_meta "https://api.leafmc.one/v2/projects/leaf/versions/${VERSION}/builds/${BUILD}")
+    NAME=$(echo "${META}" | jq -r '.downloads.primary.name // empty')
+    SHA=$(echo "${META}" | jq -r '.downloads.primary.sha256 // empty')
+    require_data "${NAME}" "no se pudo resolver la descarga de Leaf ${VERSION}."
+
+    echo "Descargando Leaf ${VERSION} build ${BUILD}"
+    fetch -o "${JARFILE}" \
+        "https://api.leafmc.one/v2/projects/leaf/versions/${VERSION}/builds/${BUILD}/downloads/${NAME}"
+    verify_sha "${JARFILE}" "${SHA}" sha256
+}
+
+# --- Gale ------------------------------------------------------------------
+# Paper fork published as GitHub release assets named gale-<mcversion>-R<x>.jar.
+install_gale() {
+    github_releases "GaleMC/Gale"
+
+    if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
+        RESULT=$(github_asset "gale-")
+    else
+        RESULT=$(github_asset "gale-${VERSION}-")
+    fi
+
+    if [ -z "${RESULT}" ]; then
+        echo "ERROR: Gale no publica builds para Minecraft ${VERSION}." >&2
+        echo "Versiones disponibles:" >&2
+        echo "${RELEASES}" | jq -r '[ .[].assets[].name | select(startswith("gale-")) ] | unique | .[]' >&2
+        exit 1
+    fi
+
+    URL=$(echo "${RESULT}" | cut -d' ' -f1)
+    SHA=$(echo "${RESULT}" | cut -d' ' -f2)
+
+    echo "Descargando ${URL}"
+    fetch -o "${JARFILE}" "${URL}"
+    verify_sha "${JARFILE}" "${SHA}" sha256
+}
+
+# --- NanoLimbo -------------------------------------------------------------
+# Minimal limbo server: holds players in a waiting room while the real server
+# restarts. Not a Minecraft server in the usual sense, so it has no EULA and no
+# server.properties; the entrypoint knows this from the marker written below.
+install_nanolimbo() {
+    github_releases "Nan1t/NanoLimbo"
+
+    RESULT=$(github_asset "NanoLimbo")
+    if [ -z "${RESULT}" ]; then
+        echo "ERROR: no se encontro ningun jar publicado de NanoLimbo." >&2
+        exit 1
+    fi
+
+    URL=$(echo "${RESULT}" | cut -d' ' -f1)
+    SHA=$(echo "${RESULT}" | cut -d' ' -f2)
+
+    echo "Descargando ${URL}"
+    fetch -o "${JARFILE}" "${URL}"
+    verify_sha "${JARFILE}" "${SHA}" sha256
+    echo "NanoLimbo se configura en settings.yml, no en server.properties."
+}
+
+# --- Sponge (SpongeVanilla) ------------------------------------------------
+# A different plugin platform, not compatible with Bukkit/Spigot plugins.
+# Versions are named "<minecraft>-<api>-RC<n>", so the Minecraft version has to
+# be read from tagValues rather than parsed out of the version string.
+install_sponge() {
+    API="https://dl-api.spongepowered.org/v2/groups/org.spongepowered/artifacts/spongevanilla"
+
+    LIST=$(fetch_meta "${API}/versions?offset=0&limit=100")
+    require_data "${LIST}" "no se pudo consultar las versiones de Sponge."
+
+    if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
+        # Snapshots of unreleased Minecraft versions are skipped, and a build
+        # Sponge itself marks as recommended wins over a plain newest.
+        SPONGE_VER=$(echo "${LIST}" | jq -r '
+            [ .artifacts | to_entries[]
+              | select(.value.tagValues.minecraft | test("snapshot") | not) ] as $stable
+            | ( [ $stable[] | select(.value.recommended) ][0] // $stable[0] // empty )
+            | .key // empty')
+        require_data "${SPONGE_VER}" "no se pudo determinar la ultima version de Sponge."
+    else
+        SPONGE_VER=$(echo "${LIST}" | jq -r --arg v "${VERSION}" '
+            [ .artifacts | to_entries[]
+              | select(.value.tagValues.minecraft == $v) ][0].key // empty')
+        if [ -z "${SPONGE_VER}" ]; then
+            echo "ERROR: Sponge no publica builds para Minecraft ${VERSION}." >&2
+            echo "Versiones de Minecraft disponibles:" >&2
+            echo "${LIST}" | jq -r '[ .artifacts[].tagValues.minecraft ] | unique | .[]' | tr '\n' ' ' >&2
+            echo >&2
+            exit 1
+        fi
+    fi
+
+    echo "Version de Sponge: ${SPONGE_VER}"
+
+    # The "universal" classifier is the runnable server jar; the rest are
+    # sources and internal modules.
+    DETAIL=$(fetch_meta "${API}/versions/${SPONGE_VER}")
+    RESULT=$(echo "${DETAIL}" | jq -r '
+        [ .assets[] | select(.classifier == "universal" and .extension == "jar") ][0]
+        | if . == null then empty else "\(.downloadUrl) \(.sha1 // "")" end')
+    require_data "${RESULT}" "Sponge ${SPONGE_VER} no publica un jar ejecutable."
+
+    URL=$(echo "${RESULT}" | cut -d' ' -f1)
+    SHA=$(echo "${RESULT}" | cut -d' ' -f2)
+
+    echo "Descargando ${URL}"
+    fetch -o "${JARFILE}" "${URL}"
+    verify_sha "${JARFILE}" "${SHA}" sha1
+}
+
 # --- Pufferfish ------------------------------------------------------------
 # Published on Jenkins, one job per Minecraft minor (Pufferfish-1.21, ...).
 install_pufferfish() {
@@ -629,30 +777,12 @@ install_mohist() {
 install_arclight() {
     LOADER=$(echo "${ARCLIGHT_LOADER:-forge}" | tr '[:upper:]' '[:lower:]')
 
-    # Fetched once and reused. The GitHub API allows 60 unauthenticated requests
-    # per hour PER IP, which a busy node shares across every install running on
-    # it, so each extra call here is a real chance of a 403 later.
-    RELEASES=$(fetch_meta "https://api.github.com/repos/IzzelAliz/Arclight/releases?per_page=100" 2>/dev/null || true)
+    github_releases "IzzelAliz/Arclight"
 
-    if [ -z "${RELEASES}" ] || [ "$(echo "${RELEASES}" | jq -r 'type')" != "array" ]; then
-        echo "ERROR: no se pudo consultar las versiones de Arclight en GitHub." >&2
-        echo "Causa habitual: el nodo agoto el limite de 60 consultas por hora que" >&2
-        echo "GitHub aplica por IP. Reintenta en unos minutos." >&2
-        exit 1
-    fi
-
-    # GitHub publishes an asset digest as "sha256:<hex>", so the prefix is
-    # stripped here and the bare hash handed to verify_sha.
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
-        RESULT=$(echo "${RELEASES}" | jq -r --arg l "${LOADER}" \
-            '[.[].assets[] | select(.name | startswith("arclight-" + $l + "-"))][0]
-             | if . == null then empty
-               else "\(.browser_download_url) \((.digest // "") | sub("^sha256:";""))" end')
+        RESULT=$(github_asset "arclight-${LOADER}-")
     else
-        RESULT=$(echo "${RELEASES}" | jq -r --arg l "${LOADER}" --arg v "${VERSION}" \
-            '[.[].assets[] | select(.name | startswith("arclight-" + $l + "-" + $v + "-"))][0]
-             | if . == null then empty
-               else "\(.browser_download_url) \((.digest // "") | sub("^sha256:";""))" end')
+        RESULT=$(github_asset "arclight-${LOADER}-${VERSION}-")
     fi
 
     URL=$(echo "${RESULT}" | cut -d' ' -f1)
@@ -674,7 +804,11 @@ install_arclight() {
 case "${SOFTWARE}" in
     paper|folia|velocity|waterfall) install_paper_family "${SOFTWARE}" ;;
     purpur)                         install_purpur ;;
+    leaf)                           install_leaf ;;
+    gale)                           install_gale ;;
     spigot)                         install_spigot ;;
+    sponge)                         install_sponge ;;
+    nanolimbo)                      install_nanolimbo ;;
     vanilla)                        install_vanilla ;;
     fabric)                         install_fabric ;;
     quilt)                          install_quilt ;;
@@ -686,9 +820,10 @@ case "${SOFTWARE}" in
     arclight)                       install_arclight ;;
     *)
         echo "ERROR: software desconocido '${SOFTWARE}'." >&2
-        echo "Valores validos: paper, folia, purpur, pufferfish, spigot, vanilla," >&2
-        echo "                 fabric, quilt, forge, neoforge, mohist, arclight," >&2
-        echo "                 velocity, waterfall, bungeecord, none" >&2
+        echo "Valores validos: paper, folia, purpur, pufferfish, leaf, gale," >&2
+        echo "                 spigot, vanilla, sponge, fabric, quilt, forge," >&2
+        echo "                 neoforge, mohist, arclight, velocity, waterfall," >&2
+        echo "                 bungeecord, nanolimbo, none" >&2
         exit 1
         ;;
 esac
@@ -712,9 +847,10 @@ esac
 # later software swap by an external installer module is not misread.
 echo "${SOFTWARE}" > .multiversion-software
 
-# Proxies have no EULA and no server.properties.
+# Proxies have no EULA and no server.properties, and neither does NanoLimbo:
+# it never runs Minecraft itself, it only speaks the protocol.
 case "${SOFTWARE}" in
-    velocity|waterfall|bungeecord) ;;
+    velocity|waterfall|bungeecord|nanolimbo) ;;
     *)
         # Unset counts as accepted, matching the entrypoint. Only an explicit
         # false/0 opts out.
