@@ -727,26 +727,82 @@ configure_geyser_port() {
 # safe to set from the panel on every boot, even on a server already running.
 # ---------------------------------------------------------------------------
 
-VOICECHAT_CONFIG="voicechat/voicechat-server.properties"
+VOICECHAT_FILE="voicechat-server.properties"
 VOICECHAT_DEFAULT_PORT="24454"
+
+# "mod" or "plugin", decided by where the jar was found. The two builds keep
+# their config in different places and the difference matters: writing to the
+# wrong one configures a file nobody reads, which looks exactly like the
+# setting doing nothing at all.
+VOICECHAT_KIND=""
+
+# Locates the config wherever this build actually keeps it:
+#   config/voicechat/   mod builds (Fabric, NeoForge, Forge, Quilt)
+#   plugins/voicechat/  Bukkit plugin build
+#   voicechat/          older layouts, kept as a fallback
+# Searched rather than hardcoded, for the same reason configure_geyser_port
+# searches for its own config.yml.
+voicechat_find_config() {
+    local preferred="" hit
+    case "${VOICECHAT_KIND}" in
+        mod)    preferred="config" ;;
+        plugin) preferred="plugins" ;;
+    esac
+
+    # On a hybrid server both trees can exist; the one matching the jar wins.
+    if [ -n "${preferred}" ]; then
+        hit=$(find "${preferred}" -maxdepth 2 -name "${VOICECHAT_FILE}" 2>/dev/null | head -1)
+        [ -n "${hit}" ] && { printf '%s' "${hit}"; return 0; }
+    fi
+
+    find config plugins voicechat -maxdepth 2 -name "${VOICECHAT_FILE}" 2>/dev/null | head -1
+}
+
+# Where to write when nothing exists yet, which depends on the build.
+voicechat_config_target() {
+    local existing
+    existing=$(voicechat_find_config)
+    if [ -n "${existing}" ]; then
+        printf '%s' "${existing}"
+        return 0
+    fi
+
+    if [ "${VOICECHAT_KIND}" = "mod" ]; then
+        printf 'config/voicechat/%s' "${VOICECHAT_FILE}"
+    else
+        printf 'plugins/voicechat/%s' "${VOICECHAT_FILE}"
+    fi
+}
 
 # Matches the mod and the plugin builds, under any of the spellings the project
 # has shipped. Compared in lowercase because customers rename jars.
 voicechat_installed() {
-    local dir jar base
+    local dir jar base found
+    VOICECHAT_KIND=""
+
     for dir in mods plugins; do
         [ -d "${dir}" ] || continue
         for jar in "${dir}"/*.jar; do
             [ -f "${jar}" ] || continue
             base=$(basename "${jar}" | tr '[:upper:]' '[:lower:]')
             case "${base}" in
-                *voicechat*|*voice-chat*|*voice_chat*) return 0 ;;
+                *voicechat*|*voice-chat*|*voice_chat*)
+                    if [ "${dir}" = "mods" ]; then VOICECHAT_KIND="mod"; else VOICECHAT_KIND="plugin"; fi
+                    return 0 ;;
             esac
         done
     done
+
     # Present even if the jar was renamed beyond recognition: the mod writes
-    # this file itself on first run.
-    [ -f "${VOICECHAT_CONFIG}" ] && return 0
+    # this file itself on first run. The path it sits in reveals the build.
+    found=$(voicechat_find_config)
+    if [ -n "${found}" ]; then
+        case "${found}" in
+            plugins/*) VOICECHAT_KIND="plugin" ;;
+            *)         VOICECHAT_KIND="mod" ;;
+        esac
+        return 0
+    fi
     return 1
 }
 
@@ -772,8 +828,10 @@ voicechat_check_geyser_clash() {
 # Reads the port currently written in the mod's config. Empty means the file
 # does not exist yet, i.e. this is the first boot.
 voicechat_config_port() {
-    [ -f "${VOICECHAT_CONFIG}" ] || return 0
-    grep -E '^[[:space:]]*port[[:space:]]*=' "${VOICECHAT_CONFIG}" 2>/dev/null \
+    local cfg
+    cfg=$(voicechat_find_config)
+    [ -n "${cfg}" ] || return 0
+    grep -E '^[[:space:]]*port[[:space:]]*=' "${cfg}" 2>/dev/null \
         | head -1 | cut -d= -f2 | tr -d '[:space:]'
 }
 
@@ -808,15 +866,15 @@ configure_voicechat_port() {
         return 1
     fi
 
-    if [ ! -f "${VOICECHAT_CONFIG}" ]; then
-        # First boot: the mod has not generated its config yet. Writing just
-        # this key is enough because it fills in every missing option from its
-        # own defaults when it loads the file, so voice works on the first try
-        # instead of binding 24454 and needing a restart.
-        mkdir -p "$(dirname "${VOICECHAT_CONFIG}")"
-    fi
+    local cfg
+    cfg=$(voicechat_config_target)
 
-    properties_set "${VOICECHAT_CONFIG}" port "${port}"
+    # First boot: the mod has not generated its config yet. Writing just this
+    # key is enough because it fills in every missing option from its own
+    # defaults when it loads the file, so voice works on the first try instead
+    # of binding 24454 and needing a restart.
+    mkdir -p "$(dirname "${cfg}")"
+    properties_set "${cfg}" port "${port}"
 
     if [ "${port}" = "-1" ]; then
         log_ok "Chat de voz configurado en el puerto del servidor (${SERVER_PORT}/UDP)"
@@ -828,6 +886,7 @@ configure_voicechat_port() {
         fi
         voicechat_check_geyser_clash "${port}"
     fi
+    log_info "Configuracion del chat de voz: ${cfg}"
     return 0
 }
 

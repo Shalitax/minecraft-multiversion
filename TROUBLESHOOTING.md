@@ -407,9 +407,25 @@ que lo explique. Es porque el audio va por **UDP en un puerto propio**
 (`24454` por defecto) que el servidor no tiene asignado.
 
 El egg lo resuelve solo con la opción **Puerto del chat de voz**, que se escribe
-en `voicechat/voicechat-server.properties` en cada arranque. Por defecto vale
-`-1`, que significa **usar el mismo puerto del servidor**: funciona sin asignar
-nada extra, porque Wings abre TCP *y* UDP en cada allocation.
+en `voicechat-server.properties` en cada arranque. Por defecto vale `-1`, que
+significa **usar el mismo puerto del servidor**: funciona sin asignar nada
+extra, porque Wings abre TCP *y* UDP en cada allocation.
+
+El archivo **no está siempre en el mismo sitio**, así que el egg lo busca:
+
+| Instalación | Ruta |
+|---|---|
+| Mod (Fabric, NeoForge, Forge, Quilt) | `config/voicechat/` |
+| Plugin (Paper, Spigot, Purpur...) | `plugins/voicechat/` |
+
+La última línea del bloque de arranque dice cuál usó:
+
+```
+[i] Configuracion del chat de voz: config/voicechat/voicechat-server.properties
+```
+
+Si esa ruta no coincide con la que ves en el gestor de archivos, avisa: es un
+caso que el egg no está cubriendo.
 
 > A diferencia de Geyser, **cambiar este puerto no afecta a los jugadores**: el
 > mod se lo comunica al cliente al conectar, nadie lo escribe a mano. Por eso se

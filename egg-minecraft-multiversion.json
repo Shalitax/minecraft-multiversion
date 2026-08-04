@@ -403,8 +403,8 @@
             "field_type": "text"
         },
         {
-            "name": "Puerto del chat de voz",
-            "description": "Puerto UDP de Simple Voice Chat, si el servidor lo tiene instalado. Se escribe en su configuración en cada arranque. Déjalo en -1 para que use el MISMO puerto del servidor: así funciona sin asignar ningún puerto extra, y a los jugadores no les afecta porque el mod les dice solo qué puerto usar. Pon un número si prefieres darle un puerto propio, y recuerda asignarlo en el nodo. Con \"No modificar\" el egg no toca su configuración. Aviso: -1 no sirve si activas \"query\", porque ocupa ese mismo puerto UDP; en ese caso el egg lo detecta y no lo aplica.",
+            "name": "Puerto de voz (Simple Voice Chat)",
+            "description": "Puerto UDP de Simple Voice Chat, si el servidor lo tiene instalado. Se escribe en su configuración en cada inicio. Déjalo en -1 para que use el MISMO puerto del servidor: así funciona sin asignar ningún puerto extra, y a los jugadores no les afecta porque el mod les dice solo qué puerto usar. Pon un número si prefieres darle un puerto propio, y recuerda asignarlo en el nodo. Con \"No modificar\" el egg no toca su configuración. Aviso: -1 no sirve si activas \"query\", porque ocupa ese mismo puerto UDP; en ese caso el egg lo detecta y no lo aplica.",
             "env_variable": "VOICECHAT_PORT",
             "default_value": "-1",
             "user_viewable": true,
