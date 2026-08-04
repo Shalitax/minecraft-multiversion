@@ -330,21 +330,29 @@ detect_server_type() {
 # server.properties management
 # ---------------------------------------------------------------------------
 
-# Sets key=value in server.properties, replacing an existing line or appending
-# a new one. Skipped entirely when the value is "auto", which is what lets a
-# user manage a setting by hand without the panel overwriting it every boot.
-set_prop() {
-    local key="$1" val="$2"
-    is_auto "${val}" && return 0
-    [ -f server.properties ] || touch server.properties
+# Sets key=value in any .properties file, replacing the existing line or
+# appending a new one. Shared by server.properties and the voice chat config,
+# which use the same format.
+properties_set() {
+    local file="$1" key="$2" val="$3"
+    [ -f "${file}" ] || touch "${file}"
 
     awk -v k="${key}" -v v="${val}" '
         BEGIN { found = 0 }
         index($0, k "=") == 1 { print k "=" v; found = 1; next }
         { print }
         END { if (!found) print k "=" v }
-    ' server.properties > server.properties.tmp && mv server.properties.tmp server.properties
+    ' "${file}" > "${file}.tmp" && mv "${file}.tmp" "${file}"
+}
 
+# Sets key=value in server.properties. Skipped entirely when the value is
+# "auto", which is what lets a user manage a setting by hand without the panel
+# overwriting it every boot.
+set_prop() {
+    local key="$1" val="$2"
+    is_auto "${val}" && return 0
+
+    properties_set server.properties "${key}" "${val}"
     log_info "server.properties: ${key}=${val}"
 }
 
@@ -710,13 +718,13 @@ configure_geyser_port() {
 # ---------------------------------------------------------------------------
 # Simple Voice Chat
 #
-# Detection and advice only: the customer's own config is never rewritten.
-#
 # Voice chat carries audio over UDP on a port of its own, and the resulting
 # ticket is always the same shape: players join the game perfectly, the voice
-# icon stays red, and nothing anywhere says why. Wings does bind UDP on every
-# allocation, so the fix usually costs nothing, but only if somebody knows to
-# look for it.
+# icon stays red, and nothing anywhere says why.
+#
+# Unlike Geyser, the port here is invisible to players: the client learns it
+# from the server during the handshake, nobody types it. That is what makes it
+# safe to set from the panel on every boot, even on a server already running.
 # ---------------------------------------------------------------------------
 
 VOICECHAT_CONFIG="voicechat/voicechat-server.properties"
@@ -761,28 +769,88 @@ voicechat_check_geyser_clash() {
     log_warn "Cambia 'Puerto de Geyser (Bedrock)' en el panel, o el puerto del chat de voz."
 }
 
+# Reads the port currently written in the mod's config. Empty means the file
+# does not exist yet, i.e. this is the first boot.
+voicechat_config_port() {
+    [ -f "${VOICECHAT_CONFIG}" ] || return 0
+    grep -E '^[[:space:]]*port[[:space:]]*=' "${VOICECHAT_CONFIG}" 2>/dev/null \
+        | head -1 | cut -d= -f2 | tr -d '[:space:]'
+}
+
+# Points Simple Voice Chat at the UDP port chosen in the panel.
+#
+# Mirrors configure_geyser_port, with one difference: the config is a
+# .properties file, not YAML, so yq is not involved.
+configure_voicechat_port() {
+    local port="${VOICECHAT_PORT:-No modificar}"
+
+    # Leaves the file untouched, for anyone managing it by hand.
+    if is_auto "${port}"; then
+        return 1
+    fi
+
+    case "${port}" in
+        -1) ;;
+        ''|*[!0-9]*)
+            log_warn "'Puerto del chat de voz' esperaba un numero o -1, y recibio '${port}'."
+            log_warn "Se deja el que tenga la configuracion del mod."
+            return 1 ;;
+    esac
+
+    # -1 means "reuse the Minecraft server's port", which works because Wings
+    # binds UDP on every allocation as well as TCP. The mod's own documentation
+    # warns this collides with server query, which uses UDP on that same port,
+    # so that case is checked rather than assumed.
+    if [ "${port}" = "-1" ] && grep -qE '^enable-query[[:space:]]*=[[:space:]]*true' server.properties 2>/dev/null; then
+        log_warn "El chat de voz esta puesto en 'compartir puerto', pero 'query' esta activado"
+        log_warn "y ya ocupa ${SERVER_PORT}/UDP. Se deja la configuracion del mod sin tocar."
+        log_warn "Asigna un puerto propio al chat de voz, o desactiva query."
+        return 1
+    fi
+
+    if [ ! -f "${VOICECHAT_CONFIG}" ]; then
+        # First boot: the mod has not generated its config yet. Writing just
+        # this key is enough because it fills in every missing option from its
+        # own defaults when it loads the file, so voice works on the first try
+        # instead of binding 24454 and needing a restart.
+        mkdir -p "$(dirname "${VOICECHAT_CONFIG}")"
+    fi
+
+    properties_set "${VOICECHAT_CONFIG}" port "${port}"
+
+    if [ "${port}" = "-1" ]; then
+        log_ok "Chat de voz configurado en el puerto del servidor (${SERVER_PORT}/UDP)"
+        voicechat_check_geyser_clash "${SERVER_PORT}"
+    else
+        log_ok "Chat de voz configurado en el puerto UDP ${port}"
+        if [ "${port}" != "${SERVER_PORT}" ]; then
+            log_warn "Ese puerto tiene que estar asignado al servidor desde el nodo."
+        fi
+        voicechat_check_geyser_clash "${port}"
+    fi
+    return 0
+}
+
 check_voicechat() {
     voicechat_installed || return 0
 
-    local port=""
-    if [ -f "${VOICECHAT_CONFIG}" ]; then
-        port=$(grep -E '^[[:space:]]*port[[:space:]]*=' "${VOICECHAT_CONFIG}" 2>/dev/null \
-            | head -1 | cut -d= -f2 | tr -d '[:space:]')
-    fi
+    # When the panel manages the port there is nothing left to advise about.
+    configure_voicechat_port && return 0
 
-    # First boot: the mod has not written its config yet, so the port it will
-    # pick is still the default one.
+    local port
+    port=$(voicechat_config_port)
+
+    # First boot with the port left on "No modificar": the mod has not written
+    # its config yet, so the port it will pick is still its own default.
     if [ -z "${port}" ]; then
         log_warn "Simple Voice Chat detectado, pero aun no ha creado su configuracion."
         log_warn "Al arrancar usara el puerto ${VOICECHAT_DEFAULT_PORT}/UDP, que este servidor no tiene asignado."
-        log_warn "Opciones: asignar ese puerto en el nodo, o editar ${VOICECHAT_CONFIG}"
-        log_warn "y poner 'port=-1' para reutilizar el puerto ${SERVER_PORT} que ya tiene."
+        log_warn "Opciones: poner un puerto en 'Puerto del chat de voz' desde el panel,"
+        log_warn "o dejarlo en -1 para reutilizar el puerto ${SERVER_PORT} que ya tiene."
         voicechat_check_geyser_clash "${VOICECHAT_DEFAULT_PORT}"
         return 0
     fi
 
-    # -1 is the mod's own way of saying "reuse the Minecraft server's port",
-    # which works here because Wings binds UDP on every allocation too.
     if [ "${port}" = "-1" ] || [ "${port}" = "${SERVER_PORT}" ]; then
         log_ok "Simple Voice Chat usa el puerto del servidor (${SERVER_PORT}/UDP). No hace falta asignar otro."
         voicechat_check_geyser_clash "${SERVER_PORT}"
@@ -792,7 +860,7 @@ check_voicechat() {
     log_warn "Simple Voice Chat esta configurado en el puerto ${port}/UDP."
     log_warn "Ese puerto tiene que estar asignado al servidor desde el nodo, o los"
     log_warn "jugadores entraran al juego pero el chat de voz no conectara."
-    log_warn "Alternativa sin puerto extra: poner 'port=-1' en ${VOICECHAT_CONFIG}"
+    log_warn "Alternativa sin puerto extra: poner -1 en 'Puerto del chat de voz'."
     voicechat_check_geyser_clash "${port}"
 }
 

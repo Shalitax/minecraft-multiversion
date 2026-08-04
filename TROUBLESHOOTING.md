@@ -401,35 +401,44 @@ delante y activar Geyser en el proxy.
 
 ## Chat de voz (Simple Voice Chat)
 
-El egg **detecta** Simple Voice Chat y avisa de lo que necesita, pero **nunca
-toca su configuración**: esos archivos son del cliente.
-
 El síntoma clásico es siempre el mismo: los jugadores entran al juego sin
 problema, pero el icono del micro se queda en rojo y no hay nada en la consola
 que lo explique. Es porque el audio va por **UDP en un puerto propio**
 (`24454` por defecto) que el servidor no tiene asignado.
 
-### `[!] Simple Voice Chat detectado, pero aun no ha creado su configuracion.`
+El egg lo resuelve solo con la opción **Puerto del chat de voz**, que se escribe
+en `voicechat/voicechat-server.properties` en cada arranque. Por defecto vale
+`-1`, que significa **usar el mismo puerto del servidor**: funciona sin asignar
+nada extra, porque Wings abre TCP *y* UDP en cada allocation.
 
-Primer arranque. Todavía no existe `voicechat/voicechat-server.properties`, así
-que el mod usará el 24454.
+> A diferencia de Geyser, **cambiar este puerto no afecta a los jugadores**: el
+> mod se lo comunica al cliente al conectar, nadie lo escribe a mano. Por eso se
+> puede aplicar en cada arranque sin romper nada en un servidor ya en marcha.
 
-### `[!] Simple Voice Chat esta configurado en el puerto 24454/UDP.`
-
-Hay dos salidas, y la segunda no cuesta nada:
-
-1. **Asignar el puerto** 24454 al servidor desde el nodo.
-2. **Poner `port=-1`** en `voicechat/voicechat-server.properties`. El chat de
-   voz pasa a usar el mismo puerto que el servidor. Funciona porque Wings abre
-   TCP *y* UDP en cada allocation, así que ese puerto ya está disponible.
-
-> La opción 2 es la recomendada salvo que el cliente use **query**
-> (`enable-query=true` en server.properties), que ocupa UDP en ese mismo
-> puerto. Por defecto query está apagado.
-
-### `[+] Simple Voice Chat usa el puerto del servidor (X/UDP).`
+### `[+] Chat de voz configurado en el puerto del servidor (X/UDP)`
 
 Todo correcto, no hay que hacer nada.
+
+### `[+] Chat de voz configurado en el puerto UDP X` + `[!] Ese puerto tiene que estar asignado...`
+
+Se le dio un puerto propio. Hay que **asignarlo en el nodo** o el chat de voz no
+conectará. Si no quieres gastar una allocation, pon la opción en `-1`.
+
+### `[!] El chat de voz esta puesto en 'compartir puerto', pero 'query' esta activado`
+
+`-1` no sirve aquí: **query** ya ocupa ese mismo puerto UDP. El egg lo detecta y
+**no toca la configuración del mod** en vez de romper una de las dos cosas.
+
+**Respuesta:** darle un puerto propio al chat de voz, o desactivar query.
+
+### `[!] 'Puerto del chat de voz' esperaba un numero o -1`
+
+Se escribió texto en el campo. **No se toca nada** y el egg pasa a modo aviso.
+
+### `[!] Simple Voice Chat detectado, pero aun no ha creado su configuracion.`
+
+Solo sale con la opción en **"No modificar"**. En ese modo el egg no escribe
+nada, y el mod usará su 24454 por defecto.
 
 ### `[!] CONFLICTO: Geyser y el chat de voz quedarian los dos en X/UDP.`
 
