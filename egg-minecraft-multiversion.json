@@ -77,8 +77,8 @@
             "description": "Con \"Automático\" el servidor detecta solo qué software tiene instalado, que es lo correcto casi siempre. Cambia esto solo si la detección falla. Usa forge-legacy para Forge anterior a 1.17, que arranca desde un único .jar. Paper y todos sus forks (incluidos Spigot y Sponge) usan el tipo \"vanilla\": es correcto, arrancan igual.",
             "env_variable": "SERVER_TYPE_OVERRIDE",
             "default_value": "Automático",
-            "user_viewable": true,
-            "user_editable": true,
+            "user_viewable": false,
+            "user_editable": false,
             "rules": "required|string|in:Automático,vanilla,forge,forge-legacy,neoforge,fabric,quilt,mohist,arclight,velocity,bungeecord,nanolimbo",
             "field_type": "text"
         },
@@ -116,7 +116,7 @@
             "name": "Zona horaria",
             "description": "Zona horaria del servidor. Ejemplos: UTC, America/Santiago, Europe/Madrid.",
             "env_variable": "TZ",
-            "default_value": "UTC",
+            "default_value": "America/Santiago",
             "user_viewable": true,
             "user_editable": true,
             "rules": "required|string|max:64",
@@ -384,7 +384,7 @@
         },
         {
             "name": "Instalar Geyser y Floodgate",
-            "description": "Permite que entren jugadores de Minecraft Bedrock (móvil y consola). Descarga la versión correcta del plugin según el software detectado y lo deja configurado en el puerto indicado abajo. IMPORTANTE: ese puerto UDP tiene que estar asignado al servidor en el nodo, o Geyser no podrá abrirlo. No funciona en Vanilla puro, Sponge ni NanoLimbo, porque no cargan plugins de Bukkit.",
+            "description": "Permite que entren jugadores de Minecraft Bedrock (móvil y consola). Descarga la versión correcta del plugin según el software detectado y lo deja configurado en el puerto indicado abajo. No funciona en Vanilla puro, Sponge ni NanoLimbo, porque no cargan plugins de Bukkit.",
             "env_variable": "INSTALL_GEYSER",
             "default_value": "0",
             "user_viewable": true,
@@ -394,7 +394,7 @@
         },
         {
             "name": "Puerto de Geyser (Bedrock)",
-            "description": "Puerto UDP por el que entran los jugadores de Bedrock. Es el que tienen que escribir en su lista de servidores. Debe coincidir con una asignación UDP real del servidor en el nodo: si no coincide, Geyser no podrá abrirlo. Se aplica en cada arranque, así que basta con cambiarlo y reiniciar. Por defecto 19132, el puerto estándar de Bedrock.",
+            "description": "Puerto UDP por el que entran los jugadores de Bedrock. Es el que tienen que escribir en su lista de servidores.",
             "env_variable": "GEYSER_PORT",
             "default_value": "19132",
             "user_viewable": true,
