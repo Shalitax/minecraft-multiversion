@@ -708,6 +708,95 @@ configure_geyser_port() {
 }
 
 # ---------------------------------------------------------------------------
+# Simple Voice Chat
+#
+# Detection and advice only: the customer's own config is never rewritten.
+#
+# Voice chat carries audio over UDP on a port of its own, and the resulting
+# ticket is always the same shape: players join the game perfectly, the voice
+# icon stays red, and nothing anywhere says why. Wings does bind UDP on every
+# allocation, so the fix usually costs nothing, but only if somebody knows to
+# look for it.
+# ---------------------------------------------------------------------------
+
+VOICECHAT_CONFIG="voicechat/voicechat-server.properties"
+VOICECHAT_DEFAULT_PORT="24454"
+
+# Matches the mod and the plugin builds, under any of the spellings the project
+# has shipped. Compared in lowercase because customers rename jars.
+voicechat_installed() {
+    local dir jar base
+    for dir in mods plugins; do
+        [ -d "${dir}" ] || continue
+        for jar in "${dir}"/*.jar; do
+            [ -f "${jar}" ] || continue
+            base=$(basename "${jar}" | tr '[:upper:]' '[:lower:]')
+            case "${base}" in
+                *voicechat*|*voice-chat*|*voice_chat*) return 0 ;;
+            esac
+        done
+    done
+    # Present even if the jar was renamed beyond recognition: the mod writes
+    # this file itself on first run.
+    [ -f "${VOICECHAT_CONFIG}" ] && return 0
+    return 1
+}
+
+# Warns when voice chat and Geyser would end up on the same UDP port. Only one
+# of them can have it, and the loser stops working without printing anything at
+# all, so the collision is worth naming out loud.
+#
+# Compared as numbers, not assumed: Geyser is normally on its own 19132 and
+# coexists with voice chat perfectly well. Warning unconditionally would be
+# noise on the common setup, and noise is what makes real warnings get ignored.
+voicechat_check_geyser_clash() {
+    local vc_port="$1"
+    is_true "${INSTALL_GEYSER}" || return 0
+
+    local geyser_port="${GEYSER_PORT:-19132}"
+    [ "${vc_port}" = "${geyser_port}" ] || return 0
+
+    log_warn "CONFLICTO: Geyser y el chat de voz quedarian los dos en ${vc_port}/UDP."
+    log_warn "Solo uno puede usarlo, y el otro dejara de funcionar sin dar error."
+    log_warn "Cambia 'Puerto de Geyser (Bedrock)' en el panel, o el puerto del chat de voz."
+}
+
+check_voicechat() {
+    voicechat_installed || return 0
+
+    local port=""
+    if [ -f "${VOICECHAT_CONFIG}" ]; then
+        port=$(grep -E '^[[:space:]]*port[[:space:]]*=' "${VOICECHAT_CONFIG}" 2>/dev/null \
+            | head -1 | cut -d= -f2 | tr -d '[:space:]')
+    fi
+
+    # First boot: the mod has not written its config yet, so the port it will
+    # pick is still the default one.
+    if [ -z "${port}" ]; then
+        log_warn "Simple Voice Chat detectado, pero aun no ha creado su configuracion."
+        log_warn "Al arrancar usara el puerto ${VOICECHAT_DEFAULT_PORT}/UDP, que este servidor no tiene asignado."
+        log_warn "Opciones: asignar ese puerto en el nodo, o editar ${VOICECHAT_CONFIG}"
+        log_warn "y poner 'port=-1' para reutilizar el puerto ${SERVER_PORT} que ya tiene."
+        voicechat_check_geyser_clash "${VOICECHAT_DEFAULT_PORT}"
+        return 0
+    fi
+
+    # -1 is the mod's own way of saying "reuse the Minecraft server's port",
+    # which works here because Wings binds UDP on every allocation too.
+    if [ "${port}" = "-1" ] || [ "${port}" = "${SERVER_PORT}" ]; then
+        log_ok "Simple Voice Chat usa el puerto del servidor (${SERVER_PORT}/UDP). No hace falta asignar otro."
+        voicechat_check_geyser_clash "${SERVER_PORT}"
+        return 0
+    fi
+
+    log_warn "Simple Voice Chat esta configurado en el puerto ${port}/UDP."
+    log_warn "Ese puerto tiene que estar asignado al servidor desde el nodo, o los"
+    log_warn "jugadores entraran al juego pero el chat de voz no conectara."
+    log_warn "Alternativa sin puerto extra: poner 'port=-1' en ${VOICECHAT_CONFIG}"
+    voicechat_check_geyser_clash "${port}"
+}
+
+# ---------------------------------------------------------------------------
 # Client-only mod detection
 #
 # The usual reason a modpack refuses to start on a server is a client-only mod
@@ -1641,6 +1730,7 @@ apply_properties
 apply_proxy_config
 optimize_configs
 install_geyser
+check_voicechat
 scan_client_mods
 
 print_diagnostics

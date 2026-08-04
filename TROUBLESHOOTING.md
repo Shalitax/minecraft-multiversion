@@ -397,6 +397,53 @@ Bedrock simplemente no entraban, sin ningún error.
 **Respuesta:** cambiar a Paper o un fork suyo, o poner un proxy (Velocity)
 delante y activar Geyser en el proxy.
 
+---
+
+## Chat de voz (Simple Voice Chat)
+
+El egg **detecta** Simple Voice Chat y avisa de lo que necesita, pero **nunca
+toca su configuración**: esos archivos son del cliente.
+
+El síntoma clásico es siempre el mismo: los jugadores entran al juego sin
+problema, pero el icono del micro se queda en rojo y no hay nada en la consola
+que lo explique. Es porque el audio va por **UDP en un puerto propio**
+(`24454` por defecto) que el servidor no tiene asignado.
+
+### `[!] Simple Voice Chat detectado, pero aun no ha creado su configuracion.`
+
+Primer arranque. Todavía no existe `voicechat/voicechat-server.properties`, así
+que el mod usará el 24454.
+
+### `[!] Simple Voice Chat esta configurado en el puerto 24454/UDP.`
+
+Hay dos salidas, y la segunda no cuesta nada:
+
+1. **Asignar el puerto** 24454 al servidor desde el nodo.
+2. **Poner `port=-1`** en `voicechat/voicechat-server.properties`. El chat de
+   voz pasa a usar el mismo puerto que el servidor. Funciona porque Wings abre
+   TCP *y* UDP en cada allocation, así que ese puerto ya está disponible.
+
+> La opción 2 es la recomendada salvo que el cliente use **query**
+> (`enable-query=true` en server.properties), que ocupa UDP en ese mismo
+> puerto. Por defecto query está apagado.
+
+### `[+] Simple Voice Chat usa el puerto del servidor (X/UDP).`
+
+Todo correcto, no hay que hacer nada.
+
+### `[!] CONFLICTO: Geyser y el chat de voz quedarian los dos en X/UDP.`
+
+Solo sale cuando los dos acaban **en el mismo número de puerto**. Con Geyser en
+su 19132 de siempre y el chat de voz en 24454 o compartiendo el del servidor, no
+hay conflicto y no se avisa de nada.
+
+Cuando sí coinciden, uno de los dos deja de funcionar **sin dar ningún error**.
+
+**Respuesta:** cambiar **Puerto de Geyser (Bedrock)** en el panel, o el puerto
+del chat de voz en su `voicechat-server.properties`.
+
+---
+
 ### `[!] Geyser no es compatible con 'forge', se omite`
 
 Geyser publica builds para Paper y derivados, los proxies (Velocity,

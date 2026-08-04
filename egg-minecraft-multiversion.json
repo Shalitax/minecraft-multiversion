@@ -413,7 +413,7 @@
             "field_type": "text"
         },
         {
-            "name": "Revisar mods solo de cliente",
+            "name": "Revisar mods client-side (modpacks)",
             "description": "Muchos modpacks no arrancan porque traen mods que solo funcionan en el cliente (OptiFine, shaders, minimapas). Esta opción revisa la carpeta mods/ antes de arrancar y los detecta. \"Solo avisar\" los lista en la consola sin tocar nada; \"Mover a una carpeta aparte\" los saca a mods-desactivados/ para que el servidor arranque solo.",
             "env_variable": "CLIENT_MODS_ACTION",
             "default_value": "Solo avisar",
