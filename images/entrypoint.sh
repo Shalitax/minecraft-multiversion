@@ -15,7 +15,7 @@ cd /home/container || exit 1
 # Bumped by hand when this file changes in a way worth telling apart in a
 # support ticket. MV_BUILD_* are baked in by the Dockerfile at build time, so
 # a cached image can be identified even when the tag has not changed.
-MULTIVERSION_VERSION="1.3.1"
+MULTIVERSION_VERSION="1.3.2"
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -106,38 +106,6 @@ is_auto() {
     case "$(normalize_value "${1}")" in
         auto|automatico|default|unset|"no modificar"|"sin cambios") return 0 ;;
         *) return 1 ;;
-    esac
-}
-
-# The panel shows friendly Spanish labels, but server.properties only accepts
-# the literal values below. These map one onto the other, accepting the raw
-# English values too so existing servers keep working.
-# An empty result means "not recognised": the caller warns and skips.
-map_bool() {
-    case "$(normalize_value "${1}")" in
-        activado|activada|true|1|si|yes|on|enabled)      echo "true" ;;
-        desactivado|desactivada|false|0|no|off|disabled) echo "false" ;;
-        *)                                               echo "" ;;
-    esac
-}
-
-map_difficulty() {
-    case "$(normalize_value "${1}")" in
-        pacifico|peaceful) echo "peaceful" ;;
-        facil|easy)        echo "easy" ;;
-        normal)            echo "normal" ;;
-        dificil|hard)      echo "hard" ;;
-        *)                 echo "" ;;
-    esac
-}
-
-map_gamemode() {
-    case "$(normalize_value "${1}")" in
-        supervivencia|survival) echo "survival" ;;
-        creativo|creative)      echo "creative" ;;
-        aventura|adventure)     echo "adventure" ;;
-        espectador|spectator)   echo "spectator" ;;
-        *)                      echo "" ;;
     esac
 }
 
@@ -327,12 +295,11 @@ detect_server_type() {
 }
 
 # ---------------------------------------------------------------------------
-# server.properties management
+# Properties helpers
 # ---------------------------------------------------------------------------
 
-# Sets key=value in any .properties file, replacing the existing line or
-# appending a new one. Shared by server.properties and the voice chat config,
-# which use the same format.
+# Sets key=value in a .properties file, replacing the existing line or
+# appending a new one. Currently used for the Simple Voice Chat configuration.
 properties_set() {
     local file="$1" key="$2" val="$3"
     [ -f "${file}" ] || touch "${file}"
@@ -345,79 +312,9 @@ properties_set() {
     ' "${file}" > "${file}.tmp" && mv "${file}.tmp" "${file}"
 }
 
-# Sets key=value in server.properties. Skipped entirely when the value is
-# "auto", which is what lets a user manage a setting by hand without the panel
-# overwriting it every boot.
-set_prop() {
-    local key="$1" val="$2"
-    is_auto "${val}" && return 0
-
-    properties_set server.properties "${key}" "${val}"
-    log_info "server.properties: ${key}=${val}"
-}
-
-# Typed setters. Each one refuses to write a value it does not understand,
-# because a bad value in server.properties stops the server from booting and
-# the panel label is the only thing most users ever see.
-set_prop_mapped() {
-    local key="$1" raw="$2" mapper="$3" val
-    is_auto "${raw}" && return 0
-
-    val=$(${mapper} "${raw}")
-    if [ -z "${val}" ]; then
-        log_warn "Valor no reconocido para '${key}': '${raw}'. No se modifica server.properties."
-        return 0
-    fi
-    set_prop "${key}" "${val}"
-}
-
-set_prop_num() {
-    local key="$1" raw="$2"
-    is_auto "${raw}" && return 0
-
-    case "${raw}" in
-        ''|*[!0-9]*)
-            log_warn "'${key}' esperaba un numero y recibio '${raw}'. No se modifica server.properties."
-            return 0 ;;
-    esac
-    set_prop "${key}" "${raw}"
-}
-
-apply_properties() {
-    # Once the client has saved server.properties from HexMinecraftTools, the
-    # module owns these values. Keeping this marker prevents the legacy MC_*
-    # variables from overwriting an intentional client-side change on every
-    # container start. New or unmigrated servers still use the egg variables.
-    if [ -f .hexminecrafttools-properties-owned ]; then
-        log_info "server.properties gestionado por HexMinecraftTools; no se aplican variables MC_* antiguas"
-        return 0
-    fi
-
-    [ "${IS_PROXY}" = "1" ] && return 0
-
-    set_prop_mapped "online-mode" "${MC_ONLINE_MODE}" map_bool
-    set_prop_mapped "difficulty"  "${MC_DIFFICULTY}"  map_difficulty
-    set_prop_mapped "gamemode"    "${MC_GAMEMODE}"    map_gamemode
-    set_prop_mapped "pvp"         "${MC_PVP}"         map_bool
-    set_prop_mapped "white-list"  "${MC_WHITELIST}"   map_bool
-
-    set_prop_num "max-players"   "${MC_MAX_PLAYERS}"
-    set_prop_num "view-distance" "${MC_VIEW_DISTANCE}"
-
-    # Free text: whatever the user typed goes in as-is.
-    set_prop "motd"       "${MC_MOTD}"
-    set_prop "level-name" "${MC_LEVEL_NAME}"
-    set_prop "level-seed" "${MC_LEVEL_SEED}"
-}
-
-# Proxies keep their bind address in their own config file. The panel's
-# server.properties parser cannot reach these, so they are handled here.
+# Proxies keep their bind address in their own config file. The allocation is
+# still managed automatically because these files do not use server.properties.
 apply_proxy_config() {
-    # Proxy configs are TOML/YAML, so the panel label has to be mapped to a
-    # real boolean here too. Empty means unrecognised, and is skipped.
-    local online=""
-    is_auto "${MC_ONLINE_MODE}" || online=$(map_bool "${MC_ONLINE_MODE}")
-
     # A proxy writes its config on first run, so on a brand-new server there is
     # nothing to patch yet and it will bind to its own default port instead of
     # the allocated one. Saying so out loud turns "nobody can connect to my new
@@ -437,16 +334,6 @@ apply_proxy_config() {
             if [ -f velocity.toml ]; then
                 sed -i -E "s|^\s*bind\s*=.*|bind = \"0.0.0.0:${SERVER_PORT}\"|" velocity.toml
                 log_info "velocity.toml: bind = 0.0.0.0:${SERVER_PORT}"
-                if [ -n "${online}" ]; then
-                    sed -i -E "s|^\s*online-mode\s*=.*|online-mode = ${online}|" velocity.toml
-                    log_info "velocity.toml: online-mode = ${online}"
-                fi
-                if ! is_auto "${MC_MOTD}"; then
-                    local motd_safe
-                    motd_safe=$(sed_escape_replacement "${MC_MOTD}")
-                    sed -i -E "s|^\s*motd\s*=.*|motd = \"${motd_safe}\"|" velocity.toml
-                    log_info "velocity.toml: motd actualizado"
-                fi
             fi
             ;;
         bungeecord|waterfall)
@@ -454,10 +341,6 @@ apply_proxy_config() {
                 sed -i -E "s|^(\s*)host:\s*.*|\1host: 0.0.0.0:${SERVER_PORT}|" config.yml
                 sed -i -E "s|^(\s*)query_port:\s*.*|\1query_port: ${SERVER_PORT}|" config.yml
                 log_info "config.yml: host = 0.0.0.0:${SERVER_PORT}"
-                if [ -n "${online}" ]; then
-                    sed -i -E "s|^(\s*)online_mode:\s*.*|\1online_mode: ${online}|" config.yml
-                    log_info "config.yml: online_mode = ${online}"
-                fi
             fi
             ;;
         nanolimbo)
@@ -1862,7 +1745,6 @@ if is_true "${AUTO_UPDATE}"; then
 fi
 
 accept_eula
-apply_properties
 apply_proxy_config
 optimize_configs
 install_geyser

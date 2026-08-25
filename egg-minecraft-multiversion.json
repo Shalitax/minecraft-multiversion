@@ -6,7 +6,7 @@
     "exported_at": "2026-08-25T05:25:14.031Z",
     "name": "Minecraft Multiversión",
     "author": "support@hexservers.com",
-    "description": "Un único egg para cualquier servidor de Minecraft Java. Instala Paper, Purpur, Pufferfish, Leaf, Gale, Folia, Spigot, Vanilla, Sponge, Forge, NeoForge, Fabric, Quilt, Mohist, Arclight, Velocity, BungeeCord, Waterfall o NanoLimbo, y al arrancar el entrypoint detecta lo que hay en disco (incluido CraftBukkit) para armar el comando de inicio adecuado. Como la detección se basa en los archivos presentes, un módulo instalador externo puede cambiar el software cuando quiera sin tocar el egg. Añade opciones en el panel para server.properties (modo online, dificultad, distancia de renderizado y más), ajuste de la JVM, actualización automática opcional y validación previa al arranque. IMPORTANTE: elige la imagen de Java acorde a la versión de Minecraft; las versiones 26.x en adelante necesitan Java 25. REQUIERE las imágenes Docker propias de este egg.",
+    "description": "Un único egg para cualquier servidor de Minecraft Java. Instala Paper, Purpur, Pufferfish, Leaf, Gale, Folia, Spigot, Vanilla, Sponge, Forge, NeoForge, Fabric, Quilt, Mohist, Arclight, Velocity, BungeeCord, Waterfall o NanoLimbo, y al arrancar el entrypoint detecta lo que hay en disco (incluido CraftBukkit) para armar el comando de inicio adecuado. Como la detección se basa en los archivos presentes, un módulo instalador externo puede cambiar el software cuando quiera sin tocar el egg. Incluye ajustes de JVM, actualización automática opcional y validación previa al arranque; los ajustes de server.properties se administran desde Hex Minecraft Tools. IMPORTANTE: elige la imagen de Java acorde a la versión de Minecraft; las versiones 26.x en adelante necesitan Java 25. REQUIERE las imágenes Docker propias de este egg.",
     "features": [
         "eula",
         "java_version",
@@ -203,106 +203,6 @@
             "user_viewable": false,
             "user_editable": false,
             "rules": "required|boolean",
-            "field_type": "text"
-        },
-        {
-            "name": "Modo online (premium)",
-            "description": "Activado: solo entran cuentas originales de Minecraft compradas en Mojang. Desactivado: entra cualquiera, incluidas cuentas no originales. \"No modificar\" deja el valor que ya tenga el archivo server.properties.",
-            "env_variable": "MC_ONLINE_MODE",
-            "default_value": "No modificar",
-            "user_viewable": true,
-            "user_editable": true,
-            "rules": "required|string|in:Activado,Desactivado,No modificar",
-            "field_type": "text"
-        },
-        {
-            "name": "Dificultad",
-            "description": "Dificultad del mundo. \"No modificar\" deja la que ya esté configurada en el servidor.",
-            "env_variable": "MC_DIFFICULTY",
-            "default_value": "No modificar",
-            "user_viewable": true,
-            "user_editable": true,
-            "rules": "required|string|in:Pacífico,Fácil,Normal,Difícil,No modificar",
-            "field_type": "text"
-        },
-        {
-            "name": "Modo de juego",
-            "description": "Modo con el que entran los jugadores nuevos. \"No modificar\" deja el que ya esté configurado.",
-            "env_variable": "MC_GAMEMODE",
-            "default_value": "No modificar",
-            "user_viewable": true,
-            "user_editable": true,
-            "rules": "required|string|in:Supervivencia,Creativo,Aventura,Espectador,No modificar",
-            "field_type": "text"
-        },
-        {
-            "name": "PvP (combate entre jugadores)",
-            "description": "Activado permite que los jugadores se hagan daño entre ellos. \"No modificar\" deja el valor actual.",
-            "env_variable": "MC_PVP",
-            "default_value": "No modificar",
-            "user_viewable": true,
-            "user_editable": true,
-            "rules": "required|string|in:Activado,Desactivado,No modificar",
-            "field_type": "text"
-        },
-        {
-            "name": "Jugadores máximos",
-            "description": "Número máximo de jugadores conectados a la vez. Escribe solo el número, por ejemplo 50. Usa \"No modificar\" para dejar el valor actual.",
-            "env_variable": "MC_MAX_PLAYERS",
-            "default_value": "No modificar",
-            "user_viewable": true,
-            "user_editable": true,
-            "rules": "required|string|regex:/^(No modificar)?[0-9]{0,5}$/",
-            "field_type": "text"
-        },
-        {
-            "name": "Distancia de renderizado",
-            "description": "Cuántos chunks ve cada jugador, entre 3 y 32. Bajarlo a 6 u 8 es la forma más efectiva de mejorar el rendimiento con mucha gente conectada. Usa \"No modificar\" para dejar el valor actual.",
-            "env_variable": "MC_VIEW_DISTANCE",
-            "default_value": "No modificar",
-            "user_viewable": true,
-            "user_editable": true,
-            "rules": "required|string|regex:/^(No modificar)?[0-9]{0,2}$/",
-            "field_type": "text"
-        },
-        {
-            "name": "Lista blanca (whitelist)",
-            "description": "Activada, solo pueden entrar los jugadores que hayas autorizado con el comando /whitelist add. \"No modificar\" deja el valor actual.",
-            "env_variable": "MC_WHITELIST",
-            "default_value": "No modificar",
-            "user_viewable": true,
-            "user_editable": true,
-            "rules": "required|string|in:Activado,Desactivado,No modificar",
-            "field_type": "text"
-        },
-        {
-            "name": "Semilla del mundo",
-            "description": "Semilla que define cómo se genera el mundo. Solo tiene efecto al crear un mundo nuevo: si ya tienes uno, no cambia nada. Usa \"No modificar\" para dejarlo como está.",
-            "env_variable": "MC_LEVEL_SEED",
-            "default_value": "No modificar",
-            "user_viewable": true,
-            "user_editable": true,
-            "rules": "required|string|max:64",
-            "field_type": "text"
-        },
-        {
-            "name": "Nombre del mundo",
-            "description": "Carpeta donde se guarda el mundo (level-name). Cambiarlo hace que el servidor genere o cargue otro mundo distinto, sin borrar el anterior. Usa \"No modificar\" para dejar el actual.",
-            "env_variable": "MC_LEVEL_NAME",
-            "default_value": "No modificar",
-            "user_viewable": true,
-            "user_editable": true,
-            "rules": "required|string|max:64",
-            "field_type": "text"
-        },
-        {
-            "name": "MOTD (mensaje del servidor)",
-            "description": "Mensaje que ven los jugadores en su lista de servidores. Usa \"No modificar\" para dejar el actual.",
-            "env_variable": "MC_MOTD",
-            "default_value": "No modificar",
-            "user_viewable": true,
-            "user_editable": true,
-            "rules": "required|string|max:200",
             "field_type": "text"
         },
         {
