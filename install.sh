@@ -34,7 +34,9 @@ MODPACK_REQUEST_FILE="/mnt/server/.hexminecraftmodpacks-request"
 MODPACK_REQUEST=0
 MODPACK_PROVIDER=""
 MODPACK_ID=""
+MODPACK_NAME=""
 MODPACK_VERSION_ID=""
+MODPACK_VERSION_NAME=""
 MODPACK_MODE=""
 MODPACK_EULA=""
 
@@ -122,7 +124,9 @@ if [ -f "${MODPACK_REQUEST_FILE}" ]; then
     MODPACK_PROTOCOL=$(modpack_request_value protocol)
     MODPACK_PROVIDER=$(modpack_request_value provider | tr '[:upper:]' '[:lower:]')
     MODPACK_ID=$(modpack_request_value modpack_id)
+    MODPACK_NAME=$(modpack_request_value modpack_name | tr -d '\r')
     MODPACK_VERSION_ID=$(modpack_request_value modpack_version_id)
+    MODPACK_VERSION_NAME=$(modpack_request_value modpack_version_name | tr -d '\r')
     MODPACK_MODE=$(modpack_request_value mode | tr '[:upper:]' '[:lower:]')
     MODPACK_EULA=$(modpack_request_value eula)
 
@@ -271,8 +275,15 @@ if [ "${SOFTWARE}" = "none" ]; then
         # resulting layout on the next boot, so no software marker is invented
         # from the catalogue provider.
         INSTALLED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)
-        printf '{"protocol":1,"provider":"%s","modpack_id":"%s","modpack_version_id":"%s","installed_at":"%s"}\n' \
-            "${MODPACK_PROVIDER}" "${MODPACK_ID}" "${MODPACK_VERSION_ID}" "${INSTALLED_AT}" > .hexminecraftmodpacks-installed.json
+        jq -n \
+            --arg provider "${MODPACK_PROVIDER}" \
+            --arg modpack_id "${MODPACK_ID}" \
+            --arg modpack_name "${MODPACK_NAME:-${MODPACK_ID}}" \
+            --arg modpack_version_id "${MODPACK_VERSION_ID}" \
+            --arg modpack_version_name "${MODPACK_VERSION_NAME:-${MODPACK_VERSION_ID}}" \
+            --arg installed_at "${INSTALLED_AT}" \
+            '{protocol:1,provider:$provider,modpack_id:$modpack_id,modpack_name:$modpack_name,modpack_version_id:$modpack_version_id,modpack_version_name:$modpack_version_name,installed_at:$installed_at}' \
+            > .hexminecraftmodpacks-installed.json
 
         case "$(echo "${EULA}" | tr '[:upper:]' '[:lower:]')" in
             false|0|no|desactivado)
