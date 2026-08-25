@@ -1,7 +1,9 @@
 #!/bin/ash
 #
 # Install script for the Minecraft Multiversion egg.
-# Runs in ghcr.io/pterodactyl/installers:alpine. Server files go to /mnt/server.
+# Runs in eclipse-temurin:21-alpine. Java is required by the external modpack
+# installer; jq and git are required by the normal Multiversion installers.
+# Server files go to /mnt/server.
 #
 # This only has to place the initial files. The entrypoint detects whatever is
 # on disk at boot, so an external installer module can replace the software at
@@ -14,11 +16,27 @@ set -e
 mkdir -p /mnt/server
 cd /mnt/server
 
+# Pterodactyl runs installation scripts in this separate container, not in the
+# server's selected runtime image. Keep all dependencies explicit so both the
+# regular egg installers and Hex Minecraft Modpacks work in the same image.
+apk add --no-cache --update curl bash ca-certificates jq git >/dev/null
+
 SOFTWARE=$(echo "${SERVER_SOFTWARE:-paper}" | tr '[:upper:]' '[:lower:]')
 VERSION="${SERVER_VERSION:-latest}"
 CHANNEL="${UPDATE_CHANNEL:-STABLE}"
 JARFILE="${SERVER_JARFILE:-server.jar}"
 INSTALL_MODE="environment"
+
+# Hex Minecraft Modpacks hands the egg a one-shot request in the same way as
+# Hex Minecraft Versions. The request contains only validated provider and
+# catalogue identifiers; the module never needs to change the egg or Wings.
+MODPACK_REQUEST_FILE="/mnt/server/.hexminecraftmodpacks-request"
+MODPACK_REQUEST=0
+MODPACK_PROVIDER=""
+MODPACK_ID=""
+MODPACK_VERSION_ID=""
+MODPACK_MODE=""
+MODPACK_EULA=""
 
 # Hex Minecraft Versions hands an installation request to the egg through a
 # one-shot file. This avoids a race with Wings: SERVER_SOFTWARE can
@@ -92,6 +110,73 @@ if [ -f "${REQUEST_FILE}" ]; then
     echo "Solicitud recibida desde Hex Minecraft Versions."
 fi
 
+# Modpack installation request. This is intentionally separate from the
+# version request: a modpack is allowed to choose its own loader and Minecraft
+# release, so the multiversion entrypoint must detect the result from the files
+# the installer leaves on disk.
+if [ -f "${MODPACK_REQUEST_FILE}" ]; then
+    modpack_request_value() {
+        sed -n "s/^$1=//p" "${MODPACK_REQUEST_FILE}" | head -1 | tr -d '\r'
+    }
+
+    MODPACK_PROTOCOL=$(modpack_request_value protocol)
+    MODPACK_PROVIDER=$(modpack_request_value provider | tr '[:upper:]' '[:lower:]')
+    MODPACK_ID=$(modpack_request_value modpack_id)
+    MODPACK_VERSION_ID=$(modpack_request_value modpack_version_id)
+    MODPACK_MODE=$(modpack_request_value mode | tr '[:upper:]' '[:lower:]')
+    MODPACK_EULA=$(modpack_request_value eula)
+
+    rm -f "${MODPACK_REQUEST_FILE}"
+
+    if [ "${MODPACK_PROTOCOL}" != "1" ]; then
+        echo "ERROR: solicitud de Hex Minecraft Modpacks incompatible." >&2
+        exit 1
+    fi
+
+    case "${MODPACK_PROVIDER}" in
+        atlauncher|curseforge|feedthebeast|modrinth|technic|voidswrath) ;;
+        *)
+            echo "ERROR: proveedor de modpacks no permitido." >&2
+            exit 1
+            ;;
+    esac
+
+    case "${MODPACK_ID}" in
+        ''|*[!A-Za-z0-9._:-]*)
+            echo "ERROR: identificador de modpack no valido." >&2
+            exit 1
+            ;;
+    esac
+
+    case "${MODPACK_VERSION_ID}" in
+        ''|*[!A-Za-z0-9._:-]*)
+            echo "ERROR: version de modpack no valida." >&2
+            exit 1
+            ;;
+    esac
+
+    case "${MODPACK_MODE}" in
+        preserve) WIPE_ON_INSTALL=0 ;;
+        wipe)     WIPE_ON_INSTALL=1 ;;
+        *)
+            echo "ERROR: modo de instalacion de modpack no valido." >&2
+            exit 1
+            ;;
+    esac
+
+    case "${MODPACK_EULA}" in
+        0|1) EULA="${MODPACK_EULA}" ;;
+        *)
+            echo "ERROR: valor de EULA de modpack no valido." >&2
+            exit 1
+            ;;
+    esac
+
+    MODPACK_REQUEST=1
+    INSTALL_MODE="${MODPACK_MODE}"
+    echo "Solicitud recibida desde Hex Minecraft Modpacks."
+fi
+
 # ---------------------------------------------------------------------------
 # Optional wipe
 #
@@ -104,7 +189,7 @@ case "$(echo "${WIPE_ON_INSTALL:-1}" | tr '[:upper:]' '[:lower:]')" in
         echo "Reinstalacion sin borrado: se conservan los archivos existentes."
 
         if [ "${INSTALL_MODE}" = "preserve" ]; then
-            echo "Limpiando solo el runtime anterior; mundos, mods, plugins y configuraciones se conservan."
+            echo "Limpiando solo el runtime anterior; mundos, plugins y configuraciones compartidas se conservan."
 
             # Old loader trees win over a newly downloaded plain jar in the
             # entrypoint detection order. Regenerating these files is required
@@ -114,6 +199,14 @@ case "$(echo "${WIPE_ON_INSTALL:-1}" | tr '[:upper:]' '[:lower:]')" in
             rm -f forge-*.jar neoforge-*.jar unix_args.txt run.sh run.bat user_jvm_args.txt
             rm -f .multiversion-software .multiversion-version .multiversion-update .multiversion-optimized
             rm -f .hexminecraftversion-installed.json
+            rm -f .hexminecraftmodpacks-installed.json
+
+            # A modpack update must not leave removed mods beside the new pack.
+            # Worlds, plugins and configuration files remain available in the
+            # preserve mode, matching the behaviour of the reference installer.
+            if [ "${MODPACK_REQUEST}" = "1" ]; then
+                rm -rf mods coremods .fabric .quilt
+            fi
         fi
         ;;
     *)
@@ -151,6 +244,48 @@ echo " Archivo  : ${JARFILE}"
 echo "=================================================="
 
 if [ "${SOFTWARE}" = "none" ]; then
+    if [ "${MODPACK_REQUEST}" = "1" ]; then
+        MODPACK_URL="https://www.ric-rac.org/minecraft-modpack-server-installer/x86_64-unknown-linux-musl"
+        case "$(uname -m)" in
+            arm64|aarch64) MODPACK_URL="https://www.ric-rac.org/minecraft-modpack-server-installer/aarch64-unknown-linux-musl" ;;
+        esac
+
+        echo "Descargando instalador de modpacks (${MODPACK_PROVIDER})..."
+        fetch -o /tmp/hex-minecraft-modpack-installer "${MODPACK_URL}"
+        chmod +x /tmp/hex-minecraft-modpack-installer
+
+        if ! /tmp/hex-minecraft-modpack-installer \
+            --provider "${MODPACK_PROVIDER}" \
+            --modpack-id "${MODPACK_ID}" \
+            --modpack-version-id "${MODPACK_VERSION_ID}" \
+            --directory /mnt/server; then
+            rm -f /tmp/hex-minecraft-modpack-installer
+            echo "ERROR: el instalador externo no pudo preparar el modpack." >&2
+            exit 1
+        fi
+
+        rm -f /tmp/hex-minecraft-modpack-installer
+
+        # The downloaded pack can contain a launcher-specific server jar, an
+        # args file, or a Fabric/Quilt launcher. The entrypoint detects the
+        # resulting layout on the next boot, so no software marker is invented
+        # from the catalogue provider.
+        INSTALLED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)
+        printf '{"protocol":1,"provider":"%s","modpack_id":"%s","modpack_version_id":"%s","installed_at":"%s"}\n' \
+            "${MODPACK_PROVIDER}" "${MODPACK_ID}" "${MODPACK_VERSION_ID}" "${INSTALLED_AT}" > .hexminecraftmodpacks-installed.json
+
+        case "$(echo "${EULA}" | tr '[:upper:]' '[:lower:]')" in
+            false|0|no|desactivado)
+                echo "Aceptacion automatica del EULA desactivada." ;;
+            *)
+                echo "eula=true" > eula.txt
+                echo "EULA de Minecraft aceptado (https://aka.ms/MinecraftEULA)." ;;
+        esac
+        [ -f server.properties ] || touch server.properties
+        echo "Instalacion del modpack completada. El egg detectara el loader al arrancar."
+        exit 0
+    fi
+
     echo "El software esta configurado como 'none'. No se descargara nada."
     echo "Usa tu modulo instalador para colocar los archivos del servidor."
     exit 0
