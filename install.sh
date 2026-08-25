@@ -14,6 +14,84 @@ set -e
 mkdir -p /mnt/server
 cd /mnt/server
 
+SOFTWARE=$(echo "${SERVER_SOFTWARE:-paper}" | tr '[:upper:]' '[:lower:]')
+VERSION="${SERVER_VERSION:-latest}"
+CHANNEL="${UPDATE_CHANNEL:-STABLE}"
+JARFILE="${SERVER_JARFILE:-server.jar}"
+INSTALL_MODE="environment"
+
+# Hex Minecraft Versions hands an installation request to the egg through a
+# one-shot file. This avoids a race with Wings: SERVER_SOFTWARE can
+# remain "none" in the Panel while the installer still receives the requested
+# software and release. The file is removed before doing anything destructive.
+REQUEST_FILE="/mnt/server/.hexminecraftversion-request"
+if [ -f "${REQUEST_FILE}" ]; then
+    request_value() {
+        sed -n "s/^$1=//p" "${REQUEST_FILE}" | head -1 | tr -d '\r'
+    }
+
+    REQUEST_PROTOCOL=$(request_value protocol)
+    REQUEST_SOFTWARE=$(request_value software | tr '[:upper:]' '[:lower:]')
+    REQUEST_VERSION=$(request_value release)
+    REQUEST_MODE=$(request_value mode | tr '[:upper:]' '[:lower:]')
+    REQUEST_EULA=$(request_value eula)
+    REQUEST_LOADER=$(request_value loader | tr '[:upper:]' '[:lower:]')
+
+    rm -f "${REQUEST_FILE}"
+
+    if [ "${REQUEST_PROTOCOL}" != "1" ]; then
+        echo "ERROR: solicitud de Hex Minecraft Versions incompatible." >&2
+        exit 1
+    fi
+
+    case "${REQUEST_SOFTWARE}" in
+        paper|folia|purpur|pufferfish|leaf|gale|spigot|vanilla|sponge|fabric|quilt|forge|neoforge|mohist|arclight|velocity|waterfall|bungeecord|nanolimbo)
+            SOFTWARE="${REQUEST_SOFTWARE}"
+            ;;
+        *)
+            echo "ERROR: software no permitido en la solicitud del modulo." >&2
+            exit 1
+            ;;
+    esac
+
+    case "${REQUEST_VERSION}" in
+        ''|*[!A-Za-z0-9._+-]*)
+            echo "ERROR: version no valida en la solicitud del modulo." >&2
+            exit 1
+            ;;
+        *) VERSION="${REQUEST_VERSION}" ;;
+    esac
+
+    case "${REQUEST_MODE}" in
+        preserve) WIPE_ON_INSTALL=0 ;;
+        wipe)     WIPE_ON_INSTALL=1 ;;
+        *)
+            echo "ERROR: modo de instalacion no valido." >&2
+            exit 1
+            ;;
+    esac
+
+    case "${REQUEST_EULA}" in
+        0|1) EULA="${REQUEST_EULA}" ;;
+        *)
+            echo "ERROR: valor de EULA no valido." >&2
+            exit 1
+            ;;
+    esac
+
+    case "${REQUEST_LOADER}" in
+        forge|neoforge|fabric) ARCLIGHT_LOADER="${REQUEST_LOADER}" ;;
+        '') ARCLIGHT_LOADER="forge" ;;
+        *)
+            echo "ERROR: loader de Arclight no valido." >&2
+            exit 1
+            ;;
+    esac
+
+    INSTALL_MODE="${REQUEST_MODE}"
+    echo "Solicitud recibida desde Hex Minecraft Versions."
+fi
+
 # ---------------------------------------------------------------------------
 # Optional wipe
 #
@@ -24,6 +102,19 @@ cd /mnt/server
 case "$(echo "${WIPE_ON_INSTALL:-1}" | tr '[:upper:]' '[:lower:]')" in
     0|false|no|desactivado)
         echo "Reinstalacion sin borrado: se conservan los archivos existentes."
+
+        if [ "${INSTALL_MODE}" = "preserve" ]; then
+            echo "Limpiando solo el runtime anterior; mundos, mods, plugins y configuraciones se conservan."
+
+            # Old loader trees win over a newly downloaded plain jar in the
+            # entrypoint detection order. Regenerating these files is required
+            # for a real software switch, while user data lives elsewhere.
+            rm -rf libraries versions .fabric .quilt .buildtools
+            rm -f "${JARFILE}" server.jar fabric-server-launch.jar quilt-server-launch.jar
+            rm -f forge-*.jar neoforge-*.jar unix_args.txt run.sh run.bat user_jvm_args.txt
+            rm -f .multiversion-software .multiversion-version .multiversion-update .multiversion-optimized
+            rm -f .hexminecraftversion-installed.json
+        fi
         ;;
     *)
         if [ -n "$(ls -A /mnt/server 2>/dev/null)" ]; then
@@ -52,11 +143,6 @@ UA="pterodactyl-mc-multiversion/1.0 (+https://hexservers.com)"
 # longer budget because a modpack-sized artifact legitimately takes minutes.
 fetch()      { curl -sSL --fail --connect-timeout 10 --max-time 900 --retry 3 --retry-delay 2 -A "${UA}" "$@"; }
 fetch_meta() { curl -sSL --fail --connect-timeout 10 --max-time 30  --retry 2 --retry-delay 2 -A "${UA}" "$@"; }
-
-SOFTWARE=$(echo "${SERVER_SOFTWARE:-paper}" | tr '[:upper:]' '[:lower:]')
-VERSION="${SERVER_VERSION:-latest}"
-CHANNEL="${UPDATE_CHANNEL:-STABLE}"
-JARFILE="${SERVER_JARFILE:-server.jar}"
 
 echo "=================================================="
 echo " Software : ${SOFTWARE}"
@@ -846,6 +932,13 @@ esac
 # what was installed. Detection based on real files always wins over this, so a
 # later software swap by an external installer module is not misread.
 echo "${SOFTWARE}" > .multiversion-software
+echo "${VERSION}" > .multiversion-version
+
+# Machine-readable state for Hex Minecraft Versions. SOFTWARE and VERSION are
+# allowlisted above, so neither can break the JSON string.
+INSTALLED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)
+printf '{"protocol":1,"software":"%s","release":"%s","installed_at":"%s"}\n' \
+    "${SOFTWARE}" "${VERSION}" "${INSTALLED_AT}" > .hexminecraftversion-installed.json
 
 # Proxies have no EULA and no server.properties, and neither does NanoLimbo:
 # it never runs Minecraft itself, it only speaks the protocol.
