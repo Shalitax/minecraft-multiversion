@@ -15,7 +15,7 @@ cd /home/container || exit 1
 # Bumped by hand when this file changes in a way worth telling apart in a
 # support ticket. MV_BUILD_* are baked in by the Dockerfile at build time, so
 # a cached image can be identified even when the tag has not changed.
-MULTIVERSION_VERSION="1.3.0"
+MULTIVERSION_VERSION="1.3.1"
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -384,6 +384,15 @@ set_prop_num() {
 }
 
 apply_properties() {
+    # Once the client has saved server.properties from HexMinecraftTools, the
+    # module owns these values. Keeping this marker prevents the legacy MC_*
+    # variables from overwriting an intentional client-side change on every
+    # container start. New or unmigrated servers still use the egg variables.
+    if [ -f .hexminecrafttools-properties-owned ]; then
+        log_info "server.properties gestionado por HexMinecraftTools; no se aplican variables MC_* antiguas"
+        return 0
+    fi
+
     [ "${IS_PROXY}" = "1" ] && return 0
 
     set_prop_mapped "online-mode" "${MC_ONLINE_MODE}" map_bool
