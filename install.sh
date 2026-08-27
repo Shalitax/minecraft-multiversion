@@ -27,18 +27,22 @@ CHANNEL="${UPDATE_CHANNEL:-STABLE}"
 JARFILE="${SERVER_JARFILE:-server.jar}"
 INSTALL_MODE="environment"
 
-# Hex Minecraft Modpacks hands the egg a one-shot request in the same way as
-# Hex Minecraft Versions. The request contains only validated provider and
-# catalogue identifiers; the module never needs to change the egg or Wings.
-MODPACK_REQUEST_FILE="/mnt/server/.hexminecraftmodpacks-request"
+# Hex Minecraft Modpacks protocol 2 uses an internal, non-user-editable egg
+# variable. The payload is Base64 JSON so catalogue identifiers and labels are
+# never interpreted as shell syntax. A nonce stored in the installed marker
+# makes the request one-shot without weakening the egg file denylist.
+MODPACK_REQUEST_B64="${HEXMINECRAFTMODPACK_REQUEST:-}"
 MODPACK_REQUEST=0
+MODPACK_ALREADY_CONSUMED=0
 MODPACK_PROVIDER=""
 MODPACK_ID=""
 MODPACK_NAME=""
 MODPACK_VERSION_ID=""
 MODPACK_VERSION_NAME=""
+MODPACK_MINECRAFT_VERSION=""
 MODPACK_MODE=""
 MODPACK_EULA=""
+MODPACK_NONCE=""
 
 # Hex Minecraft Versions hands an installation request to the egg through a
 # one-shot file. This avoids a race with Wings: SERVER_SOFTWARE can
@@ -113,72 +117,80 @@ if [ -f "${REQUEST_FILE}" ]; then
 fi
 
 # Modpack installation request. This is intentionally separate from the
-# version request: a modpack is allowed to choose its own loader and Minecraft
-# release, so the multiversion entrypoint must detect the result from the files
-# the installer leaves on disk.
-if [ -f "${MODPACK_REQUEST_FILE}" ]; then
-    modpack_request_value() {
-        sed -n "s/^$1=//p" "${MODPACK_REQUEST_FILE}" | head -1 | tr -d '\r'
-    }
-
-    MODPACK_PROTOCOL=$(modpack_request_value protocol)
-    MODPACK_PROVIDER=$(modpack_request_value provider | tr '[:upper:]' '[:lower:]')
-    MODPACK_ID=$(modpack_request_value modpack_id)
-    MODPACK_NAME=$(modpack_request_value modpack_name | tr -d '\r')
-    MODPACK_VERSION_ID=$(modpack_request_value modpack_version_id)
-    MODPACK_VERSION_NAME=$(modpack_request_value modpack_version_name | tr -d '\r')
-    MODPACK_MODE=$(modpack_request_value mode | tr '[:upper:]' '[:lower:]')
-    MODPACK_EULA=$(modpack_request_value eula)
-
-    rm -f "${MODPACK_REQUEST_FILE}"
-
-    if [ "${MODPACK_PROTOCOL}" != "1" ]; then
+# version request: a modpack chooses its own loader and Minecraft release.
+if [ -n "${MODPACK_REQUEST_B64}" ]; then
+    if [ "${HEXMINECRAFTMODPACK_PROTOCOL:-}" != "2" ]; then
         echo "ERROR: solicitud de Hex Minecraft Modpacks incompatible." >&2
         exit 1
     fi
 
-    case "${MODPACK_PROVIDER}" in
-        atlauncher|curseforge|feedthebeast|modrinth|technic|voidswrath) ;;
-        *)
-            echo "ERROR: proveedor de modpacks no permitido." >&2
-            exit 1
-            ;;
+    if ! MODPACK_JSON=$(printf '%s' "${MODPACK_REQUEST_B64}" | base64 -d 2>/dev/null); then
+        echo "ERROR: la solicitud de modpack no usa Base64 valido." >&2
+        exit 1
+    fi
+
+    if ! printf '%s' "${MODPACK_JSON}" | jq -e '
+        type == "object" and
+        .protocol == 2 and
+        (.nonce | type == "string" and length == 32) and
+        (.provider | type == "string") and
+        (.modpack_id | type == "string" and length > 0 and length <= 191) and
+        (.modpack_name | type == "string" and length > 0 and length <= 200) and
+        (.modpack_version_id | type == "string" and length > 0 and length <= 191) and
+        (.modpack_version_name | type == "string" and length > 0 and length <= 200) and
+        (.minecraft_version | type == "string" and length > 0 and length <= 20) and
+        (.minecraft_version == "modpack" or (.minecraft_version | test("^[0-9]+\\.[0-9]+(\\.[0-9]+)?$"))) and
+        (.mode == "preserve" or .mode == "wipe") and
+        (.eula == 0 or .eula == 1)
+    ' >/dev/null 2>&1; then
+        echo "ERROR: la solicitud interna de modpack no es valida." >&2
+        exit 1
+    fi
+
+    MODPACK_NONCE=$(printf '%s' "${MODPACK_JSON}" | jq -r '.nonce')
+    case "${MODPACK_NONCE}" in
+        *[!a-f0-9]*) echo "ERROR: nonce de modpack no valido." >&2; exit 1 ;;
     esac
 
-    case "${MODPACK_ID}" in
-        ''|*[!A-Za-z0-9._:-]*)
-            echo "ERROR: identificador de modpack no valido." >&2
-            exit 1
-            ;;
-    esac
+    CONSUMED_NONCE=""
+    if [ -f .hexminecraftmodpacks-installed.json ]; then
+        CONSUMED_NONCE=$(jq -r '.request_nonce // empty' .hexminecraftmodpacks-installed.json 2>/dev/null || true)
+    fi
 
-    case "${MODPACK_VERSION_ID}" in
-        ''|*[!A-Za-z0-9._:-]*)
-            echo "ERROR: version de modpack no valida." >&2
-            exit 1
-            ;;
-    esac
+    if [ "${CONSUMED_NONCE}" = "${MODPACK_NONCE}" ]; then
+        MODPACK_ALREADY_CONSUMED=1
+        echo "La solicitud de Hex Minecraft Modpacks ya fue consumida; no se repetira."
+    else
+        MODPACK_PROVIDER=$(printf '%s' "${MODPACK_JSON}" | jq -r '.provider' | tr '[:upper:]' '[:lower:]')
+        MODPACK_ID=$(printf '%s' "${MODPACK_JSON}" | jq -r '.modpack_id')
+        MODPACK_NAME=$(printf '%s' "${MODPACK_JSON}" | jq -r '.modpack_name')
+        MODPACK_VERSION_ID=$(printf '%s' "${MODPACK_JSON}" | jq -r '.modpack_version_id')
+        MODPACK_VERSION_NAME=$(printf '%s' "${MODPACK_JSON}" | jq -r '.modpack_version_name')
+        MODPACK_MINECRAFT_VERSION=$(printf '%s' "${MODPACK_JSON}" | jq -r '.minecraft_version')
+        MODPACK_MODE=$(printf '%s' "${MODPACK_JSON}" | jq -r '.mode' | tr '[:upper:]' '[:lower:]')
+        MODPACK_EULA=$(printf '%s' "${MODPACK_JSON}" | jq -r '.eula | tostring')
 
-    case "${MODPACK_MODE}" in
-        preserve) WIPE_ON_INSTALL=0 ;;
-        wipe)     WIPE_ON_INSTALL=1 ;;
-        *)
-            echo "ERROR: modo de instalacion de modpack no valido." >&2
-            exit 1
-            ;;
-    esac
+        case "${MODPACK_PROVIDER}" in
+            atlauncher|curseforge|feedthebeast|modrinth|technic|voidswrath) ;;
+            *) echo "ERROR: proveedor de modpacks no permitido." >&2; exit 1 ;;
+        esac
 
-    case "${MODPACK_EULA}" in
-        0|1) EULA="${MODPACK_EULA}" ;;
-        *)
-            echo "ERROR: valor de EULA de modpack no valido." >&2
-            exit 1
-            ;;
-    esac
+        case "${MODPACK_MODE}" in
+            preserve) WIPE_ON_INSTALL=0 ;;
+            wipe)     WIPE_ON_INSTALL=1 ;;
+        esac
 
-    MODPACK_REQUEST=1
-    INSTALL_MODE="${MODPACK_MODE}"
-    echo "Solicitud recibida desde Hex Minecraft Modpacks."
+        EULA="${MODPACK_EULA}"
+        VERSION="${MODPACK_MINECRAFT_VERSION}"
+        MODPACK_REQUEST=1
+        INSTALL_MODE="${MODPACK_MODE}"
+        echo "Solicitud segura recibida desde Hex Minecraft Modpacks."
+    fi
+fi
+
+if [ "${MODPACK_ALREADY_CONSUMED}" = "1" ] && [ "${SOFTWARE}" = "none" ]; then
+    echo "No hay una nueva solicitud de instalacion; se conservan los archivos actuales."
+    exit 0
 fi
 
 # ---------------------------------------------------------------------------
@@ -281,8 +293,10 @@ if [ "${SOFTWARE}" = "none" ]; then
             --arg modpack_name "${MODPACK_NAME:-${MODPACK_ID}}" \
             --arg modpack_version_id "${MODPACK_VERSION_ID}" \
             --arg modpack_version_name "${MODPACK_VERSION_NAME:-${MODPACK_VERSION_ID}}" \
+            --arg minecraft_version "${MODPACK_MINECRAFT_VERSION}" \
+            --arg request_nonce "${MODPACK_NONCE}" \
             --arg installed_at "${INSTALLED_AT}" \
-            '{protocol:1,provider:$provider,modpack_id:$modpack_id,modpack_name:$modpack_name,modpack_version_id:$modpack_version_id,modpack_version_name:$modpack_version_name,installed_at:$installed_at}' \
+            '{protocol:2,provider:$provider,modpack_id:$modpack_id,modpack_name:$modpack_name,modpack_version_id:$modpack_version_id,modpack_version_name:$modpack_version_name,minecraft_version:$minecraft_version,request_nonce:$request_nonce,installed_at:$installed_at}' \
             > .hexminecraftmodpacks-installed.json
 
         case "$(echo "${EULA}" | tr '[:upper:]' '[:lower:]')" in
