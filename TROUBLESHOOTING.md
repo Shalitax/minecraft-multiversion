@@ -200,8 +200,11 @@ son los más fiables porque sus APIs casi nunca fallan.
 
 La imagen Docker no corresponde a la versión de Minecraft instalada.
 
-**Respuesta:** cambiar la versión de Java en la pestaña Startup del panel. Guía
-rápida:
+**Respuesta:** las versiones actuales de Hex Minecraft Versions y Hex Minecraft
+Modpacks seleccionan automáticamente una imagen compatible de las declaradas por
+el egg. Si el aviso continúa, abre otra vez la pantalla del módulo para ejecutar
+la reconciliación y comprueba que **Java automático** esté habilitado. Como
+alternativa manual, cambia la versión de Java en la pestaña Startup. Guía rápida:
 
 | Minecraft | Java |
 |---|---|

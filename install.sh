@@ -253,6 +253,56 @@ UA="pterodactyl-mc-multiversion/1.0 (+https://hexservers.com)"
 fetch()      { curl -sSL --fail --connect-timeout 10 --max-time 900 --retry 3 --retry-delay 2 -A "${UA}" "$@"; }
 fetch_meta() { curl -sSL --fail --connect-timeout 10 --max-time 30  --retry 2 --retry-delay 2 -A "${UA}" "$@"; }
 
+# Serverpack providers do not all expose the Minecraft release in their
+# catalogue. After extraction, recover it from well-known launcher manifests or
+# loader paths so the Panel can select the right Java image before next start.
+detect_modpack_minecraft_version() {
+    OLD_IFS="${IFS}"
+    IFS='
+'
+    for META_FILE in $(find . -maxdepth 4 -type f \( \
+        -name 'modrinth.index.json' -o -name 'manifest.json' -o \
+        -name 'minecraftinstance.json' -o -name 'instance.json' -o \
+        -name 'mmc-pack.json' \) 2>/dev/null); do
+        CANDIDATES=$(jq -r '
+            [
+                .dependencies.minecraft?,
+                (.minecraft? | if type == "object" then .version? else empty end),
+                .minecraftVersion?, .gameVersion?,
+                (.components[]? | select(.uid == "net.minecraft") | .version?)
+            ] | .[] | select(type == "string")
+        ' "${META_FILE}" 2>/dev/null || true)
+        for CANDIDATE in ${CANDIDATES}; do
+            if printf '%s' "${CANDIDATE}" | grep -Eq '^(1\.[0-9]+(\.[0-9]+)?|[2-9][0-9]\.[0-9]+(\.[0-9]+)?)$'; then
+                printf '%s\n' "${CANDIDATE}"
+                IFS="${OLD_IFS}"
+                return 0
+            fi
+        done
+    done
+    IFS="${OLD_IFS}"
+
+    for LOADER_PATH in libraries/net/minecraftforge/forge/* libraries/net/fabricmc/intermediary/* libraries/net/minecraft/server/* versions/*/*.json; do
+        [ -e "${LOADER_PATH}" ] || continue
+        CANDIDATE=$(basename "${LOADER_PATH}" | grep -oE '^(1\.[0-9]+(\.[0-9]+)?)' | head -1 || true)
+        if [ -n "${CANDIDATE}" ]; then
+            printf '%s\n' "${CANDIDATE}"
+            return 0
+        fi
+    done
+
+    for LAUNCHER_FILE in minecraft_server.*.jar forge-*.jar neoforge-*.jar; do
+        [ -e "${LAUNCHER_FILE}" ] || continue
+        CANDIDATE=$(printf '%s' "${LAUNCHER_FILE}" | grep -oE '1\.[0-9]+(\.[0-9]+)?' | head -1 || true)
+        if [ -n "${CANDIDATE}" ]; then
+            printf '%s\n' "${CANDIDATE}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 echo "=================================================="
 echo " Software : ${SOFTWARE}"
 echo " Version  : ${VERSION}"
@@ -281,6 +331,17 @@ if [ "${SOFTWARE}" = "none" ]; then
         fi
 
         rm -f /tmp/hex-minecraft-modpack-installer
+
+        if [ "${MODPACK_MINECRAFT_VERSION}" = "modpack" ]; then
+            DETECTED_MC_VERSION=$(detect_modpack_minecraft_version || true)
+            if [ -n "${DETECTED_MC_VERSION}" ]; then
+                MODPACK_MINECRAFT_VERSION="${DETECTED_MC_VERSION}"
+                VERSION="${DETECTED_MC_VERSION}"
+                echo "Version de Minecraft detectada en el serverpack: ${DETECTED_MC_VERSION}"
+            else
+                echo "AVISO: el serverpack no publica una version de Minecraft detectable; Java no se cambiara automaticamente." >&2
+            fi
+        fi
 
         # The downloaded pack can contain a launcher-specific server jar, an
         # args file, or a Fabric/Quilt launcher. The entrypoint detects the
