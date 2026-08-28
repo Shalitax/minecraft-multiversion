@@ -1,10 +1,22 @@
 #!/bin/bash
 #
-# Regresion: el choque entre los dos protocolos de solicitud del egg.
+# Regresion: como resuelve el egg una solicitud de instalacion.
 #
 # Ejecuta EL BLOQUE REAL de resolucion de solicitudes de install.sh —desde el
 # principio hasta justo antes del borrado opcional— y comprueba con que SOFTWARE
 # y VERSION se queda el instalador en cada escenario.
+#
+# Este banco nacio cubriendo el choque entre DOS protocolos: el de Hex Minecraft
+# Versions, que entregaba su orden en el archivo .hexminecraftversion-request, y
+# el de Hex Minecraft Modpacks. Cuatro de sus siete escenarios eran de ese
+# choque. Aquel protocolo se retiro: desde la 2.0.0 el modulo de versiones
+# instala el, por la API de archivos de Wings, y no escribe el archivo nunca.
+#
+# De ahi los dos escenarios nuevos del final. El archivo lo puede escribir
+# cualquier cliente desde su gestor de archivos —no esta en el file_denylist— y
+# mientras el egg lo leyera, mandaba sobre todo lo demas. Ahora tiene que ser
+# exactamente tan inerte como cualquier otro archivo suelto en la raiz, y eso
+# es lo que se comprueba aqui.
 #
 # Uso:
 #   ./tests/requests.sh                    # prueba ../install.sh
@@ -37,7 +49,13 @@ head -n "$CORTE" "$INSTALL_SH" > "$TRABAJO/bloque.sh"
 sed -i 's#^mkdir -p /mnt/server$#mkdir -p "${BANCO_RAIZ}"#' "$TRABAJO/bloque.sh"
 sed -i 's#^cd /mnt/server$#cd "${BANCO_RAIZ}"#' "$TRABAJO/bloque.sh"
 sed -i 's#^apk add .*$#true#' "$TRABAJO/bloque.sh"
-sed -i 's#/mnt/server/\.hexminecraftversion-request#${BANCO_RAIZ}/.hexminecraftversion-request#' "$TRABAJO/bloque.sh"
+
+# Si el bloque volviera a mirar el archivo de solicitud, el banco tiene que
+# enterarse en vez de probar una ruta que ya no existe.
+if grep -q 'hexminecraftversion-request' "$TRABAJO/bloque.sh"; then
+    echo "El instalador vuelve a leer .hexminecraftversion-request; este banco esta desfasado." >&2
+    exit 2
+fi
 
 NONCE="0123456789abcdef0123456789abcdef"
 
@@ -49,7 +67,7 @@ fallos=0
 total=0
 
 escenario() {
-    local nombre="$1" solicitud_version="$2" variable_modpack="$3" marcador="$4" nonce_aparte="$5"
+    local nombre="$1" variable_modpack="$2" marcador="$3" nonce_aparte="$4" rezagado="$5"
     local esperado_software="$6" esperado_version="$7"
 
     total=$((total + 1))
@@ -57,15 +75,15 @@ escenario() {
     local raiz="$TRABAJO/caso$total"
     mkdir -p "$raiz"
 
-    if [ "$solicitud_version" = "si" ]; then
-        printf 'protocol=1\nsoftware=neoforge\nrelease=1.21.1\nmode=preserve\neula=1\nloader=forge\n' \
-            > "$raiz/.hexminecraftversion-request"
-    fi
     if [ "$marcador" = "si" ]; then
         printf '{"protocol":2,"request_nonce":"%s"}' "$NONCE" > "$raiz/.hexminecraftmodpacks-installed.json"
     fi
     if [ "$nonce_aparte" = "si" ]; then
         printf '%s\n' "$NONCE" > "$raiz/.multiversion-consumed-nonce"
+    fi
+    if [ "$rezagado" = "si" ]; then
+        printf 'protocol=1\nsoftware=neoforge\nrelease=1.21.1\nmode=wipe\neula=1\nloader=forge\n' \
+            > "$raiz/.hexminecraftversion-request"
     fi
 
     local env_modpack=""
@@ -99,18 +117,20 @@ echo ""
 echo "Resolucion de solicitudes del egg"
 echo ""
 
-#          nombre                                        version  variable  marcador  nonce   software   version
-escenario "Versiones sola"                                si       no        no        no      neoforge   1.21.1
-escenario "Versiones + modpack pendiente (EL FALLO)"      si       si        no        no      neoforge   1.21.1
-escenario "Versiones + modpack ya consumido (marcador)"   si       si        si        no      neoforge   1.21.1
-escenario "Versiones + modpack ya consumido (nonce)"      si       si        no        si      neoforge   1.21.1
-escenario "Modpack solo, sin consumir"                    no       si        no        no      none       modpack
+#          nombre                                          variable  marcador  nonce  rezagado  software  version
+escenario "Modpack solo, sin consumir"                      si        no        no     no        none      modpack
 
 # Con la solicitud ya consumida y sin ninguna otra, el egg sale antes de tiempo
 # con «no hay una nueva solicitud; se conservan los archivos actuales». No llega
 # a fijar SOFTWARE ni VERSION, y eso es lo correcto: no hay nada que instalar.
-escenario "Modpack consumido (marcador), sin otra peticion" no      si        si        no      ""         ""
-escenario "Modpack consumido (nonce), sin otra peticion"   no       si        no        si      ""         ""
+escenario "Modpack consumido (marcador), sin otra peticion" si        si        no     no        ""        ""
+escenario "Modpack consumido (nonce), sin otra peticion"    si        no        si     no        ""        ""
+
+# El protocolo retirado. Un archivo rezagado —o escrito a mano por el cliente—
+# no puede cambiar nada: ni imponer su software, ni desviar la instalacion del
+# modpack que si esta pedida.
+escenario "Archivo de solicitud rezagado, sin nada mas"     no        no        no     si        none      latest
+escenario "Archivo rezagado + modpack pendiente"            si        no        no     si        none      modpack
 
 echo ""
 if [ "$fallos" -gt 0 ]; then

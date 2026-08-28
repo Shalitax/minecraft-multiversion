@@ -44,91 +44,16 @@ MODPACK_MODE=""
 MODPACK_EULA=""
 MODPACK_NONCE=""
 
-# Hex Minecraft Versions hands an installation request to the egg through a
-# one-shot file. This avoids a race with Wings: SERVER_SOFTWARE can
-# remain "none" in the Panel while the installer still receives the requested
-# software and release. The file is removed before doing anything destructive.
-REQUEST_FILE="/mnt/server/.hexminecraftversion-request"
-VERSION_REQUEST=0
-if [ -f "${REQUEST_FILE}" ]; then
-    request_value() {
-        sed -n "s/^$1=//p" "${REQUEST_FILE}" | head -1 | tr -d '\r'
-    }
-
-    REQUEST_PROTOCOL=$(request_value protocol)
-    REQUEST_SOFTWARE=$(request_value software | tr '[:upper:]' '[:lower:]')
-    REQUEST_VERSION=$(request_value release)
-    REQUEST_MODE=$(request_value mode | tr '[:upper:]' '[:lower:]')
-    REQUEST_EULA=$(request_value eula)
-    REQUEST_LOADER=$(request_value loader | tr '[:upper:]' '[:lower:]')
-
-    rm -f "${REQUEST_FILE}"
-
-    if [ "${REQUEST_PROTOCOL}" != "1" ]; then
-        echo "ERROR: solicitud de Hex Minecraft Versions incompatible." >&2
-        exit 1
-    fi
-
-    case "${REQUEST_SOFTWARE}" in
-        paper|folia|purpur|pufferfish|leaf|gale|spigot|vanilla|sponge|fabric|quilt|forge|neoforge|mohist|arclight|velocity|waterfall|bungeecord|nanolimbo)
-            SOFTWARE="${REQUEST_SOFTWARE}"
-            ;;
-        *)
-            echo "ERROR: software no permitido en la solicitud del modulo." >&2
-            exit 1
-            ;;
-    esac
-
-    case "${REQUEST_VERSION}" in
-        ''|*[!A-Za-z0-9._+-]*)
-            echo "ERROR: version no valida en la solicitud del modulo." >&2
-            exit 1
-            ;;
-        *) VERSION="${REQUEST_VERSION}" ;;
-    esac
-
-    case "${REQUEST_MODE}" in
-        preserve) WIPE_ON_INSTALL=0 ;;
-        wipe)     WIPE_ON_INSTALL=1 ;;
-        *)
-            echo "ERROR: modo de instalacion no valido." >&2
-            exit 1
-            ;;
-    esac
-
-    case "${REQUEST_EULA}" in
-        0|1) EULA="${REQUEST_EULA}" ;;
-        *)
-            echo "ERROR: valor de EULA no valido." >&2
-            exit 1
-            ;;
-    esac
-
-    case "${REQUEST_LOADER}" in
-        forge|neoforge|fabric) ARCLIGHT_LOADER="${REQUEST_LOADER}" ;;
-        '') ARCLIGHT_LOADER="forge" ;;
-        *)
-            echo "ERROR: loader de Arclight no valido." >&2
-            exit 1
-            ;;
-    esac
-
-    INSTALL_MODE="${REQUEST_MODE}"
-    VERSION_REQUEST=1
-    echo "Solicitud recibida desde Hex Minecraft Versions."
-fi
-
-# Modpack installation request. This is intentionally separate from the
-# version request: a modpack chooses its own loader and Minecraft release.
+# Modpack installation request. A modpack chooses its own loader and Minecraft
+# release, so it replaces whatever software and version were configured.
 #
-# The two are mutually exclusive and this block runs second, so without the
-# guard below a leftover modpack request silently overwrote VERSION with its
-# "modpack" sentinel right after the version request had set a real release.
-# The installer then got software=neoforge with version=modpack and aborted.
-# Whoever asked last is who gets served, and here that is the version request.
-if [ -n "${MODPACK_REQUEST_B64}" ] && [ "${VERSION_REQUEST:-0}" = "1" ]; then
-    echo "Hay una solicitud de Hex Minecraft Versions en curso; la del modpack se ignora."
-elif [ -n "${MODPACK_REQUEST_B64}" ]; then
+# Este bloque fue el segundo de dos: Hex Minecraft Versions entregaba su
+# solicitud en un archivo, y una del modpack que hubiera quedado pendiente
+# pisaba con su centinela "modpack" la version que la otra acababa de fijar.
+# Aquel protocolo ya no existe —desde la 2.0.0 el modulo instala el, por la API
+# de archivos de Wings, sin reinstalar— y quien retira ahora una solicitud de
+# modpack pendiente es el propio modulo, que vacia la variable al instalar.
+if [ -n "${MODPACK_REQUEST_B64}" ]; then
     if [ "${HEXMINECRAFTMODPACK_PROTOCOL:-}" != "2" ]; then
         echo "ERROR: solicitud de Hex Minecraft Modpacks incompatible." >&2
         exit 1
@@ -1296,9 +1221,10 @@ install_mcjars_build() {
         return 1
     fi
 
-    # Un cliente puede haber cambiado el software a mano en la pestana Arranque
-    # despues de instalar. Su eleccion manda sobre la build guardada: si no, el
-    # servidor volveria a lo anterior sin que nadie entienda por que.
+    # SERVER_SOFTWARE ya no es visible para el cliente, pero un administrador
+    # si puede cambiarla desde el panel. Una eleccion explicita manda sobre la
+    # build guardada: si no, el servidor volveria a lo anterior sin que nadie
+    # entienda por que.
     if [ "${MCJARS_TYPE}" != "${SOFTWARE}" ]; then
         echo "La build guardada es de ${MCJARS_TYPE} y se pidio ${SOFTWARE}; se ignora."
         return 1
@@ -1383,8 +1309,10 @@ mcjars_latest_build() {
 
 # Una build guardada por el modulo de versiones describe la instalacion exacta
 # que hay que reproducir, asi que gana a los instaladores propios. Una solicitud
-# en curso no: esa es mas reciente que la build, y es la que se esta atendiendo.
-if [ -n "${HEXMINECRAFTVERSION_BUILD:-}" ] && [ "${VERSION_REQUEST}" = "0" ] && [ "${MODPACK_REQUEST}" = "0" ]; then
+# de modpack no: esa es mas reciente que la build, y es la que se esta
+# atendiendo. El modulo la vacia al instalar una version, justamente para que la
+# build que deja al lado no compita con ella.
+if [ -n "${HEXMINECRAFTVERSION_BUILD:-}" ] && [ "${MODPACK_REQUEST}" = "0" ]; then
     if install_mcjars_build "${HEXMINECRAFTVERSION_BUILD}"; then
         MCJARS_INSTALLED=1
     else
@@ -1422,7 +1350,8 @@ if [ "${MCJARS_INSTALLED}" = "0" ]; then
                 echo "ERROR: no se pudo instalar '${SOFTWARE}'." >&2
                 echo "Ni este egg trae un instalador propio para el, ni mcjars pudo" >&2
                 echo "resolver una build para la version '${VERSION}'." >&2
-                echo "Revisa el software y la version en la pestana Arranque." >&2
+                echo "Revisa el software y la version del servidor en el panel de" >&2
+                echo "administracion." >&2
                 exit 1
             fi
             ;;

@@ -116,7 +116,7 @@ Si hace falta, `SERVER_TYPE_OVERRIDE` fuerza un tipo y salta la detección.
 
 | Variable | Default | Notas |
 |---|---|---|
-| `SERVER_SOFTWARE` | `none` | 29 valores más `none`. Los diecinueve con instalador propio (`paper`, `purpur`, `pufferfish`, `leaf`, `gale`, `folia`, `spigot`, `vanilla`, `sponge`, `forge`, `neoforge`, `fabric`, `quilt`, `mohist`, `arclight`, `velocity`, `waterfall`, `bungeecord`, `nanolimbo`) y diez que solo instala mcjars (`velocity_ctd`, `canvas`, `youer`, `magma`, `divinemc`, `leaves`, `aspaper`, `legacyfabric`, `pluto`, `loohplimbo`). |
+| `SERVER_SOFTWARE` | `none` | **Oculta al cliente.** 25 valores más `none`: los diecinueve con instalador propio (`paper`, `purpur`, `pufferfish`, `leaf`, `gale`, `folia`, `spigot`, `vanilla`, `sponge`, `forge`, `neoforge`, `fabric`, `quilt`, `mohist`, `arclight`, `velocity`, `waterfall`, `bungeecord`, `nanolimbo`) y seis que solo instala mcjars (`canvas`, `divinemc`, `leaves`, `aspaper`, `legacyfabric`, `pluto`). No se usa al arrancar —el entrypoint detecta lo que hay en disco— pero decide a qué vuelve la próxima reinstalación, así que dejarla en manos del cliente era darle un control que no hace nada hasta que hace algo destructivo. La mantiene al día el módulo de versiones. |
 | `HEXMINECRAFTVERSION_BUILD` | *(vacía)* | Interna. Build de mcjars que instaló el módulo de versiones; con ella, Reinstalar reproduce exactamente lo que el cliente tenía. Ver más abajo. |
 | `SERVER_VERSION` | `latest` | Solo se aplica al instalar/reinstalar. Hex Minecraft Modpacks guarda la versión exacta cuando el proveedor la publica sin ambigüedad; en caso contrario usa `modpack`. |
 | `SERVER_JARFILE` | `server.jar` | Se ignora en Forge/NeoForge 1.17+ |
@@ -174,8 +174,11 @@ La revisión compatible con el módulo declara `HEXMINECRAFTVERSION_PROTOCOL=1` 
 módulo instala por la API de archivos de Wings, con los pasos que le da mcjars. El egg cubre los
 otros dos momentos: crear el servidor, y atender el botón nativo de *Reinstalar*.
 
-El protocolo del archivo `.hexminecraftversion-request` sigue implementado para eggs y módulos
-antiguos, pero el módulo actual ya no lo escribe.
+El protocolo del archivo `.hexminecraftversion-request` **se retiró**. Nadie lo escribía desde la
+2.0.0 del módulo, y mientras el instalador lo leyera tenía dos propiedades incómodas: el archivo
+no está en el `file_denylist`, así que cualquier cliente podía escribirlo desde su gestor de
+archivos, y su presencia desactivaba tanto la reproducción de la build guardada como la solicitud
+de modpack. Un archivo que quede en disco de un servidor viejo es hoy completamente inerte.
 
 Al terminar se escriben tres estados, los escriba el egg o el módulo:
 
@@ -222,15 +225,15 @@ cosas distintas:
 1. **Reproducir lo que el módulo instaló.** Si `HEXMINECRAFTVERSION_BUILD` tiene valor, el
    instalador resuelve esa build y la instala tal cual. Es lo que hace que *Reinstalar* devuelva
    al cliente lo que tenía y no el software con el que se creó el servidor.
-2. **Instalar los diez que este egg no trae escritos.** Sin él, ampliar la lista de
+2. **Instalar los seis que este egg no trae escritos.** Sin él, ampliar la lista de
    `SERVER_SOFTWARE` habría sido ofrecer un error.
 
 El orden importa y es deliberado:
 
-- Una **solicitud en curso** (versión o modpack) gana a la build guardada: es más reciente.
+- Una **solicitud de modpack en curso** gana a la build guardada: es más reciente.
 - La **build guardada** gana a los instaladores propios: describe una instalación exacta.
-- Si mcjars no responde, o si la build es de otro software distinto al que se pide —porque el
-   cliente lo cambió a mano en la pestaña Arranque—, se cae al **instalador propio**. Esos
+- Si mcjars no responde, o si la build es de otro software distinto al que se pide —porque un
+   administrador lo cambió a mano—, se cae al **instalador propio**. Esos
    diecisiete no dependen de un tercero, y son la red cuando mcjars falla.
 
 Las rutas y los archivos de cada paso se comprueban antes de usarlos: vienen de un servicio
@@ -247,11 +250,11 @@ El módulo deja `SERVER_SOFTWARE=none`, porque el serverpack contiene y decide s
 
 Cuando el catálogo no entrega una versión única, el instalador busca la versión de Minecraft en los manifiestos del serverpack y en las rutas generadas por Forge, Fabric y el servidor de Mojang. El módulo usa el valor guardado en `.hexminecraftmodpacks-installed.json` para seleccionar después una imagen Java compatible declarada por este egg.
 
-### Cuando el cliente cambia de software por su cuenta
+### Cuando lo instalado deja de coincidir con la variable
 
-Escenario habitual: el cliente contrata con `SERVER_SOFTWARE=paper` y después instala Forge desde el gestor de versiones. La variable del panel sigue diciendo "Paper".
+Escenario habitual: el servidor se contrata con `SERVER_SOFTWARE=vanilla` y el cliente instala Forge desde el gestor de versiones. El módulo actualiza la variable, pero puede no conseguirlo —un software que la regla `in:` no admita— o puede haberla cambiado un administrador después.
 
-**Para arrancar no pasa nada.** `SERVER_SOFTWARE` no se usa en el entrypoint, solo en el script de instalación. La detección mira los archivos reales, encuentra el árbol de Forge y arranca con su args file. Que el panel muestre "Paper" es puramente cosmético.
+**Para arrancar no pasa nada.** `SERVER_SOFTWARE` no se usa en el entrypoint, solo en el script de instalación. La detección mira los archivos reales, encuentra el árbol de Forge y arranca con su args file. Desde que la variable está oculta, además, esa discrepancia ya no se le enseña a nadie que no pueda entenderla.
 
 **Para el auto-update sí importaba**, y por eso la marca se valida antes de usarla. Si lo registrado ya no coincide con lo que hay en disco, no se actualiza nada y se avisa en consola. Sin esa comprobación, un servidor que pasó de Paper a Forge se habría descargado un Paper encima; con Forge anterior a 1.17, que arranca desde un jar único, eso lo habría dejado sin funcionar.
 
