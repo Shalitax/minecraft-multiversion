@@ -217,6 +217,16 @@ case "$(echo "${WIPE_ON_INSTALL:-1}" | tr '[:upper:]' '[:lower:]')" in
             rm -f .hexminecraftversion-installed.json
             rm -f .hexminecraftmodpacks-installed.json
 
+            # The log of the runtime that is being replaced outlives it here,
+            # and the Hex modules fall back to logs/latest.log when no marker
+            # is present. Left in place it is not a missing source, it is a
+            # lying one: a Paper log makes the plugin module offer Bukkit
+            # plugins on a server that just became a Forge modpack. Keep the
+            # contents for support, but out of the name detection looks at.
+            if [ -f logs/latest.log ]; then
+                mv -f logs/latest.log logs/previous-runtime.log 2>/dev/null || rm -f logs/latest.log
+            fi
+
             # A modpack update must not leave removed mods beside the new pack.
             # Worlds, plugins and configuration files remain available in the
             # preserve mode, matching the behaviour of the reference installer.
@@ -303,6 +313,49 @@ detect_modpack_minecraft_version() {
     return 1
 }
 
+# Loader actually present in the extracted serverpack. This is deliberately not
+# derived from the catalogue provider, which says nothing about the loader: it
+# only reports what is on disk, in the same order the entrypoint resolves it,
+# with NeoForge before Forge because its own paths also contain "forge".
+#
+# Without this the modpack branch leaves no .multiversion-software at all, and
+# the Hex modules for mods and plugins are left guessing from a stale log.
+detect_modpack_loader() {
+    for LOADER_DIR in \
+        'libraries/net/neoforged/neoforge:neoforge' \
+        'libraries/net/minecraftforge/forge:forge' \
+        'libraries/net/fabricmc/fabric-loader:fabric' \
+        'libraries/org/quiltmc/quilt-loader:quilt'; do
+        if [ -d "${LOADER_DIR%%:*}" ]; then
+            printf '%s\n' "${LOADER_DIR##*:}"
+            return 0
+        fi
+    done
+
+    for LOADER_FILE in \
+        'quilt-server-launch.jar:quilt' \
+        'fabric-server-launch.jar:fabric'; do
+        if [ -f "${LOADER_FILE%%:*}" ]; then
+            printf '%s\n' "${LOADER_FILE##*:}"
+            return 0
+        fi
+    done
+
+    if [ -d .quilt ]; then printf 'quilt\n'; return 0; fi
+    if [ -d .fabric ]; then printf 'fabric\n'; return 0; fi
+
+    for LOADER_GLOB in neoforge-*.jar forge-*.jar; do
+        [ -e "${LOADER_GLOB}" ] || continue
+        case "${LOADER_GLOB}" in
+            neoforge-*) printf 'neoforge\n' ;;
+            *)          printf 'forge\n' ;;
+        esac
+        return 0
+    done
+
+    return 1
+}
+
 echo "=================================================="
 echo " Software : ${SOFTWARE}"
 echo " Version  : ${VERSION}"
@@ -354,9 +407,28 @@ if [ "${SOFTWARE}" = "none" ]; then
         fi
 
         # The downloaded pack can contain a launcher-specific server jar, an
-        # args file, or a Fabric/Quilt launcher. The entrypoint detects the
-        # resulting layout on the next boot, so no software marker is invented
-        # from the catalogue provider.
+        # args file, or a Fabric/Quilt launcher. The entrypoint still detects
+        # the resulting layout on the next boot and real files always win over
+        # these markers, so nothing here is invented from the catalogue
+        # provider: the loader is read back off the extracted tree, and the
+        # markers are only written when that read actually succeeded.
+        #
+        # They matter because they are the only thing that identifies this
+        # server to the other Hex modules before its first boot. Without them
+        # the mods and plugins screens fall back to whatever log survived the
+        # previous runtime and reach the wrong conclusion.
+        MODPACK_LOADER=$(detect_modpack_loader || true)
+        if [ -n "${MODPACK_LOADER}" ]; then
+            echo "${MODPACK_LOADER}" > .multiversion-software
+            echo "Loader detectado en el serverpack: ${MODPACK_LOADER}"
+        else
+            echo "AVISO: no se pudo identificar el loader del serverpack; se detectara al arrancar." >&2
+        fi
+
+        if [ "${MODPACK_MINECRAFT_VERSION}" != "modpack" ]; then
+            echo "${MODPACK_MINECRAFT_VERSION}" > .multiversion-version
+        fi
+
         INSTALLED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)
         jq -n \
             --arg provider "${MODPACK_PROVIDER}" \
@@ -365,9 +437,10 @@ if [ "${SOFTWARE}" = "none" ]; then
             --arg modpack_version_id "${MODPACK_VERSION_ID}" \
             --arg modpack_version_name "${MODPACK_VERSION_NAME:-${MODPACK_VERSION_ID}}" \
             --arg minecraft_version "${MODPACK_MINECRAFT_VERSION}" \
+            --arg loader "${MODPACK_LOADER}" \
             --arg request_nonce "${MODPACK_NONCE}" \
             --arg installed_at "${INSTALLED_AT}" \
-            '{protocol:2,provider:$provider,modpack_id:$modpack_id,modpack_name:$modpack_name,modpack_version_id:$modpack_version_id,modpack_version_name:$modpack_version_name,minecraft_version:$minecraft_version,request_nonce:$request_nonce,installed_at:$installed_at}' \
+            '{protocol:2,provider:$provider,modpack_id:$modpack_id,modpack_name:$modpack_name,modpack_version_id:$modpack_version_id,modpack_version_name:$modpack_version_name,minecraft_version:$minecraft_version,loader:$loader,request_nonce:$request_nonce,installed_at:$installed_at}' \
             > .hexminecraftmodpacks-installed.json
 
         case "$(echo "${EULA}" | tr '[:upper:]' '[:lower:]')" in
