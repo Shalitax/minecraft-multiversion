@@ -19,7 +19,7 @@ cd /mnt/server
 # Pterodactyl runs installation scripts in this separate container, not in the
 # server's selected runtime image. Keep all dependencies explicit so both the
 # regular egg installers and Hex Minecraft Modpacks work in the same image.
-apk add --no-cache --update curl bash ca-certificates jq git >/dev/null
+apk add --no-cache --update curl bash ca-certificates jq git unzip >/dev/null
 
 SOFTWARE=$(echo "${SERVER_SOFTWARE:-paper}" | tr '[:upper:]' '[:lower:]')
 VERSION="${SERVER_VERSION:-latest}"
@@ -312,12 +312,22 @@ echo "=================================================="
 if [ "${SOFTWARE}" = "none" ]; then
     if [ "${MODPACK_REQUEST}" = "1" ]; then
         MODPACK_URL="https://www.ric-rac.org/minecraft-modpack-server-installer/x86_64-unknown-linux-musl"
+        MODPACK_SHA256="ea443ae5982f00ba292c9cc0cd71d7f60c5544d4440151a7be80144f4feb925a"
         case "$(uname -m)" in
-            arm64|aarch64) MODPACK_URL="https://www.ric-rac.org/minecraft-modpack-server-installer/aarch64-unknown-linux-musl" ;;
+            arm64|aarch64)
+                MODPACK_URL="https://www.ric-rac.org/minecraft-modpack-server-installer/aarch64-unknown-linux-musl"
+                MODPACK_SHA256="062bbfcda1c6bad64e481ec396a83b9d27f57ac080363332079bcd47cd962029"
+                ;;
         esac
 
         echo "Descargando instalador de modpacks (${MODPACK_PROVIDER})..."
         fetch -o /tmp/hex-minecraft-modpack-installer "${MODPACK_URL}"
+        MODPACK_ACTUAL_SHA256=$(sha256sum /tmp/hex-minecraft-modpack-installer | awk '{print $1}')
+        if [ "${MODPACK_ACTUAL_SHA256}" != "${MODPACK_SHA256}" ]; then
+            rm -f /tmp/hex-minecraft-modpack-installer
+            echo "ERROR: el instalador de modpacks cambio o llego corrupto; no se ejecutara." >&2
+            exit 1
+        fi
         chmod +x /tmp/hex-minecraft-modpack-installer
 
         if ! /tmp/hex-minecraft-modpack-installer \
@@ -433,7 +443,7 @@ verify_sha() {
 installer_java_for() {
     case "$1" in
         # "latest" resolves to whatever is newest, so assume the newest
-        # requirement. ensure_java falls back downwards if it is unavailable.
+        # requirement. Falling back to an older JVM would hide a bad install.
         latest|"")           echo 25 ;;
         1.8*|1.9*|1.1[0-6]*) echo 8 ;;
         1.17*)               echo 17 ;;
@@ -447,8 +457,8 @@ installer_java_for() {
 }
 
 # Forge, NeoForge, Quilt and Spigot all ship an installer that has to be
-# executed, and the Pterodactyl installer image has no JVM at all. Only those
-# four pay this cost; every other software is a plain download.
+# executed. The install image currently brings Java 21; ensure_java reuses it
+# only when compatible and installs the exceptional generation when necessary.
 #
 #   ensure_java <feature version> [jre|jdk]
 #
@@ -456,13 +466,18 @@ installer_java_for() {
 ensure_java() {
     NEED="$1"
     KIND="${2:-jre}"
+    INSTALLER_JAVA=""
 
-    # A JRE already present does not satisfy a JDK request, so check for the
-    # compiler rather than just the launcher when one is asked for.
-    if [ "${KIND}" = "jdk" ]; then
-        command -v javac >/dev/null 2>&1 && return 0
-    else
-        command -v java >/dev/null 2>&1 && return 0
+    CURRENT_MAJOR=$(java -version 2>&1 | head -1 | sed -E 's/.*version "(1\.)?([0-9]+).*/\2/' || true)
+
+    # Java 8 installers are often incompatible with modern JVM internals. For
+    # every newer generation, an already present JDK/JRE is valid when it meets
+    # the requested minimum. The installation image currently provides Java 21.
+    if [ "${NEED}" != "8" ] && [ -n "${CURRENT_MAJOR}" ] && [ "${CURRENT_MAJOR}" -ge "${NEED}" ] 2>/dev/null; then
+        if [ "${KIND}" != "jdk" ] || command -v javac >/dev/null 2>&1; then
+            INSTALLER_JAVA=$(command -v java)
+            return 0
+        fi
     fi
 
     if ! command -v apk >/dev/null 2>&1; then
@@ -471,29 +486,32 @@ ensure_java() {
         exit 1
     fi
 
-    # Requested version first, then downwards. Alpine does not carry every JDK
-    # on every release, and an installer usually tolerates a nearby version.
+    # Requested version first, then newer compatible runtimes. Alpine does not
+    # carry every JDK, but an older JVM must never serve a newer installer.
     if [ "${KIND}" = "jdk" ]; then
         case "${NEED}" in
-            8)     CANDIDATES="openjdk8 openjdk11-jdk openjdk17-jdk" ;;
-            16|17) CANDIDATES="openjdk17-jdk openjdk21-jdk openjdk11-jdk" ;;
-            21)    CANDIDATES="openjdk21-jdk openjdk17-jdk openjdk25-jdk" ;;
-            *)     CANDIDATES="openjdk25-jdk openjdk21-jdk openjdk17-jdk" ;;
+            8)     CANDIDATES="openjdk8" ;;
+            16|17) CANDIDATES="openjdk17-jdk openjdk21-jdk openjdk25-jdk" ;;
+            21)    CANDIDATES="openjdk21-jdk openjdk25-jdk" ;;
+            *)     CANDIDATES="openjdk25-jdk" ;;
         esac
     else
         case "${NEED}" in
-            8)     CANDIDATES="openjdk8-jre openjdk11-jre-headless openjdk17-jre-headless" ;;
-            16|17) CANDIDATES="openjdk17-jre-headless openjdk21-jre-headless openjdk11-jre-headless" ;;
-            21)    CANDIDATES="openjdk21-jre-headless openjdk17-jre-headless openjdk25-jre-headless" ;;
-            *)     CANDIDATES="openjdk25-jre-headless openjdk21-jre-headless openjdk17-jre-headless" ;;
+            8)     CANDIDATES="openjdk8-jre" ;;
+            16|17) CANDIDATES="openjdk17-jre-headless openjdk21-jre-headless openjdk25-jre-headless" ;;
+            21)    CANDIDATES="openjdk21-jre-headless openjdk25-jre-headless" ;;
+            *)     CANDIDATES="openjdk25-jre-headless" ;;
         esac
     fi
 
     echo "Instalando temporalmente Java (${KIND}) para el instalador de ${SOFTWARE}..."
     for PKG in ${CANDIDATES}; do
         if apk add --no-cache "${PKG}" >/dev/null 2>&1; then
-            echo "Java disponible: $(java -version 2>&1 | head -1)"
-            return 0
+            INSTALLER_JAVA=$(apk info -L "${PKG}" 2>/dev/null | grep '/bin/java$' | head -1 || true)
+            if [ -n "${INSTALLER_JAVA}" ] && [ -x "${INSTALLER_JAVA}" ]; then
+                echo "Java disponible para el instalador: $(${INSTALLER_JAVA} -version 2>&1 | head -1)"
+                return 0
+            fi
         fi
     done
 
@@ -509,7 +527,7 @@ run_modloader_installer() {
     shift
 
     echo "Ejecutando el instalador de ${SOFTWARE}. Esto puede tardar varios minutos."
-    if ! java -jar "${INSTALLER_JAR}" "$@"; then
+    if ! "${INSTALLER_JAVA:-$(command -v java)}" -jar "${INSTALLER_JAR}" "$@"; then
         echo "ERROR: el instalador de ${SOFTWARE} termino con error." >&2
         exit 1
     fi
@@ -634,7 +652,7 @@ install_spigot() {
     fetch -o BuildTools.jar \
         "https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar"
 
-    if ! java -jar BuildTools.jar --rev "${REV}" --compile spigot; then
+    if ! "${INSTALLER_JAVA:-$(command -v java)}" -jar BuildTools.jar --rev "${REV}" --compile spigot; then
         cd /mnt/server
         rm -rf "${BUILD_DIR}"
         echo "ERROR: BuildTools no pudo compilar Spigot ${REV}." >&2
@@ -651,6 +669,9 @@ install_spigot() {
         echo "ERROR: BuildTools termino pero no dejo ningun spigot-*.jar." >&2
         exit 1
     fi
+
+    RESOLVED_VERSION=$(basename "${RESULT}" | sed -E 's/^spigot-(.+)\.jar$/\1/')
+    [ -n "${RESOLVED_VERSION}" ] && VERSION="${RESOLVED_VERSION}"
 
     mv "${RESULT}" "/mnt/server/${JARFILE}"
     cd /mnt/server
@@ -729,7 +750,7 @@ install_quilt() {
     verify_sha quilt-installer.jar "${ISHA}" sha1
 
     echo "Instalando Quilt para Minecraft ${VERSION}. Esto puede tardar varios minutos."
-    if ! java -jar quilt-installer.jar install server "${VERSION}" --download-server --install-dir=.; then
+    if ! "${INSTALLER_JAVA:-$(command -v java)}" -jar quilt-installer.jar install server "${VERSION}" --download-server --install-dir=.; then
         echo "ERROR: el instalador de Quilt termino con error." >&2
         exit 1
     fi
@@ -759,6 +780,7 @@ install_forge() {
             | [ .[] | select(.key | endswith("-latest")) ] | last
             | if . == null then empty else "\(.key | sub("-latest$";""))-\(.value)" end')
         require_data "${FULL}" "no se pudo determinar la ultima version de Forge."
+        VERSION=${FULL%%-*}
     else
         # Recommended is preferred: it is the build Forge itself considers safe.
         BUILD=$(echo "${PROMOS}" | jq -r --arg v "${VERSION}" \
@@ -803,6 +825,13 @@ neoforge_highest() {
         | sort | tail -1 | cut -d' ' -f2
 }
 
+neoforge_minecraft_version() {
+    echo "$1" | awk -F. '
+        $1 >= 26 { if ($3 == 0) printf "%s.%s", $1, $2; else printf "%s.%s.%s", $1, $2, $3; exit }
+        NF >= 2  { printf "1.%s.%s", $1, $2; exit }
+    '
+}
+
 install_neoforge() {
     ensure_java "$(installer_java_for "${VERSION}")"
 
@@ -814,6 +843,8 @@ install_neoforge() {
 
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
         NEO=$(echo "${ALL}" | grep -v -- '-beta' | neoforge_highest)
+        require_data "${NEO}" "no se pudo determinar la ultima version de NeoForge."
+        VERSION=$(neoforge_minecraft_version "${NEO}")
     else
         PREFIX=$(neoforge_prefix "${VERSION}")
         # awk index() instead of grep: the prefix is a literal whose dots must
@@ -917,6 +948,9 @@ install_gale() {
 
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
         RESULT=$(github_asset "gale-")
+        ASSET_NAME=$(basename "$(echo "${RESULT}" | cut -d' ' -f1)")
+        VERSION=$(echo "${ASSET_NAME}" | sed -nE 's/^gale-([0-9]+(\.[0-9]+)+)-.*/\1/p')
+        require_data "${VERSION}" "no se pudo determinar la version de Minecraft del build de Gale."
     else
         RESULT=$(github_asset "gale-${VERSION}-")
     fi
@@ -977,6 +1011,8 @@ install_sponge() {
             | ( [ $stable[] | select(.value.recommended) ][0] // $stable[0] // empty )
             | .key // empty')
         require_data "${SPONGE_VER}" "no se pudo determinar la ultima version de Sponge."
+        VERSION=$(echo "${LIST}" | jq -r --arg sponge "${SPONGE_VER}" '.artifacts[$sponge].tagValues.minecraft // empty')
+        require_data "${VERSION}" "Sponge no informo la version de Minecraft del build seleccionado."
     else
         SPONGE_VER=$(echo "${LIST}" | jq -r --arg v "${VERSION}" '
             [ .artifacts | to_entries[]
@@ -1030,6 +1066,9 @@ install_pufferfish() {
         echo "Pufferfish solo publica algunas versiones de Minecraft; prueba con 'latest'." >&2
         exit 1
     fi
+
+    RESOLVED_VERSION=$(basename "${ART}" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)
+    [ -n "${RESOLVED_VERSION}" ] && VERSION="${RESOLVED_VERSION}"
 
     echo "Descargando ${ART}"
     fetch -o "${JARFILE}" "https://ci.pufferfish.host/job/${JOB}/lastSuccessfulBuild/artifact/${ART}"
@@ -1088,6 +1127,9 @@ install_arclight() {
 
     if [ "${VERSION}" = "latest" ] || [ -z "${VERSION}" ]; then
         RESULT=$(github_asset "arclight-${LOADER}-")
+        ASSET_NAME=$(basename "$(echo "${RESULT}" | cut -d' ' -f1)")
+        VERSION=$(echo "${ASSET_NAME}" | sed -nE "s/^arclight-${LOADER}-([0-9]+(\.[0-9]+)+)-.*/\1/p")
+        require_data "${VERSION}" "no se pudo determinar la version de Minecraft del build de Arclight."
     else
         RESULT=$(github_asset "arclight-${LOADER}-${VERSION}-")
     fi
@@ -1145,6 +1187,28 @@ case "${SOFTWARE}" in
             exit 1
         fi
         echo "Se descargaron $(du -h "${JARFILE}" | cut -f1) en ${JARFILE}"
+        ;;
+esac
+
+# Prepare the default proxy configuration during installation so the runtime
+# entrypoint can replace its bind port before the very first public start.
+# Each project embeds its template in the jar; extraction failure is harmless
+# and leaves the entrypoint's explicit first-start warning as a fallback.
+case "${SOFTWARE}" in
+    velocity)
+        if [ ! -f velocity.toml ]; then
+            unzip -p "${JARFILE}" default-velocity.toml > velocity.toml 2>/dev/null || rm -f velocity.toml
+        fi
+        ;;
+    waterfall|bungeecord)
+        if [ ! -f config.yml ]; then
+            unzip -p "${JARFILE}" config.yml > config.yml 2>/dev/null || rm -f config.yml
+        fi
+        ;;
+    nanolimbo)
+        if [ ! -f settings.yml ]; then
+            unzip -p "${JARFILE}" settings.yml > settings.yml 2>/dev/null || rm -f settings.yml
+        fi
         ;;
 esac
 

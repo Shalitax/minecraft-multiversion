@@ -1,0 +1,65 @@
+name: Validate egg
+
+on:
+  push:
+    paths:
+      - 'install.sh'
+      - 'egg-minecraft-multiversion.json'
+      - 'sync-egg.sh'
+      - 'set-registry.sh'
+      - 'README.md'
+      - 'TROUBLESHOOTING.md'
+      - '.github/workflows/lint-egg.yml'
+  pull_request:
+    paths:
+      - 'install.sh'
+      - 'egg-minecraft-multiversion.json'
+      - 'sync-egg.sh'
+      - 'set-registry.sh'
+      - 'README.md'
+      - 'TROUBLESHOOTING.md'
+      - '.github/workflows/lint-egg.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check script syntax
+        run: |
+          bash -n images/entrypoint.sh
+          bash -n images/build.sh
+          bash -n sync-egg.sh
+          bash -n set-registry.sh
+          sh -n install.sh
+
+      - name: Check embedded installer parity
+        run: ./sync-egg.sh --check
+
+      - name: Validate egg JSON and defaults
+        run: |
+          node - <<'NODE'
+          const egg = require('./egg-minecraft-multiversion.json');
+          const fail = message => { throw new Error(message); };
+          if (egg.meta?.version !== 'PTDL_v2') fail('meta.version debe ser PTDL_v2');
+          if (!egg.scripts?.installation?.script) fail('falta el script de instalacion');
+          if (!Object.keys(egg.docker_images || {}).length) fail('docker_images esta vacio');
+          const seen = new Set();
+          for (const variable of egg.variables || []) {
+            if (seen.has(variable.env_variable)) fail(`variable duplicada: ${variable.env_variable}`);
+            seen.add(variable.env_variable);
+            if (!variable.rules) fail(`${variable.env_variable} no tiene rules`);
+            const inRule = String(variable.rules).split('|').find(rule => rule.startsWith('in:'));
+            if (inRule && !inRule.slice(3).split(',').includes(String(variable.default_value))) {
+              fail(`${variable.env_variable}: default rechazado por su regla in:`);
+            }
+          }
+          NODE
+
+      - name: Shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck -S error images/entrypoint.sh install.sh sync-egg.sh set-registry.sh

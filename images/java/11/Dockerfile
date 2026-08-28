@@ -12,7 +12,7 @@
 # Licensed MIT, same as the upstream yolks images.
 #
 
-FROM        --platform=$TARGETOS/$TARGETARCH eclipse-temurin:11.0.13_8-jdk-focal
+FROM        --platform=$TARGETOS/$TARGETARCH eclipse-temurin:11-jdk-jammy
 
 LABEL       org.opencontainers.image.licenses=MIT
 LABEL       org.opencontainers.image.title="Minecraft Multiversion (Java 11)"
@@ -29,7 +29,10 @@ RUN         apt-get update -y \
 # a different parent, which in those files it does.
 # TARGETARCH is amd64/arm64, matching yq's own release naming.
 ARG         TARGETARCH
-RUN         curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${TARGETARCH}" -o /usr/bin/yq \
+ARG         YQ_VERSION=4.53.6
+RUN         case "${TARGETARCH}" in amd64) YQ_SHA256=c5f056448f973ae7d39b5401949648a78f2dc1947d6a8eb65be60d5c504b9385 ;; arm64) YQ_SHA256=88a1016bc1d657375a35864e4f44b6f333df8ff97b559f51bba0adcb2169df09 ;; *) exit 1 ;; esac \
+            && curl -fsSL "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_${TARGETARCH}" -o /usr/bin/yq \
+            && echo "${YQ_SHA256}  /usr/bin/yq" | sha256sum -c - \
             && chmod +x /usr/bin/yq \
             && yq --version
 

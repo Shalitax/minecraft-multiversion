@@ -151,8 +151,7 @@ jobs:
       - name: Shellcheck
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
-          # Informational: style findings should not block a release.
-          shellcheck -S error images/entrypoint.sh install.sh || true
+          shellcheck -S error images/entrypoint.sh install.sh
 
   build:
     needs: [lint, prepare]
@@ -241,9 +240,34 @@ jobs:
   # namespace already filled in.
   summary:
     needs: [build, prepare]
-    if: github.event_name != 'pull_request'
+    # A partial manual build does not publish every immutable tag, so it must
+    # not generate an egg that references tags which do not exist.
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.event.inputs.tags == '')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Build immutable production egg
+        run: |
+          mkdir -p dist
+          node - <<'NODE'
+          const fs = require('fs');
+          const egg = JSON.parse(fs.readFileSync('egg-minecraft-multiversion.json', 'utf8'));
+          const version = '${{ needs.prepare.outputs.version }}';
+          for (const [label, image] of Object.entries(egg.docker_images)) {
+            egg.docker_images[label] = image.replace(/:(java_[^:]+)$/, `:$1-${version}`);
+          }
+          egg.exported_at = new Date().toISOString();
+          fs.writeFileSync('dist/egg-minecraft-multiversion.json', JSON.stringify(egg, null, 4) + '\n');
+          NODE
+
+      - name: Upload immutable production egg
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-multiversion-egg-${{ needs.prepare.outputs.version }}
+          path: dist/egg-minecraft-multiversion.json
+          if-no-files-found: error
+
       - name: Report published images
         run: |
           {

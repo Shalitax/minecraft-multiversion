@@ -15,7 +15,7 @@ cd /home/container || exit 1
 # Bumped by hand when this file changes in a way worth telling apart in a
 # support ticket. MV_BUILD_* are baked in by the Dockerfile at build time, so
 # a cached image can be identified even when the tag has not changed.
-MULTIVERSION_VERSION="1.3.2"
+MULTIVERSION_VERSION="1.4.0"
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -1705,7 +1705,15 @@ build_command() {
 # into it, the way the previous egg behaved.
 build_command_manual() {
     local parsed
-    parsed=$(echo "${STARTUP}" | sed -e 's/{{/${/g' -e 's/}}/}/g' | eval echo "$(cat -)")
+    parsed="${STARTUP}"
+    parsed="${parsed//\{\{SERVER_MIN_MEMORY\}\}/${SERVER_MIN_MEMORY:-128}}"
+    parsed="${parsed//\{\{SERVER_MEMORY\}\}/${SERVER_MEMORY}}"
+    parsed="${parsed//\{\{SERVER_JARFILE\}\}/${SERVER_JARFILE}}"
+
+    if echo "${parsed}" | grep -q '{{[^}]*}}'; then
+        log_error "El comando manual contiene una variable no permitida o desconocida."
+        return 1
+    fi
 
     build_gc_flags
     build_compat_flags
@@ -1726,7 +1734,9 @@ build_command_manual() {
         fi
     fi
 
-    MANUAL_CMD="${parsed}"
+    # Manual mode is an administrator-only compatibility path. Convert the
+    # validated command to an argv array instead of evaluating shell code.
+    read -r -a MANUAL_CMD <<< "${parsed}"
 }
 
 # ---------------------------------------------------------------------------
@@ -1761,8 +1771,10 @@ fi
 STARTUP_MODE=$(echo "${STARTUP_MODE:-auto}" | tr '[:upper:]' '[:lower:]')
 
 if [ "${STARTUP_MODE}" = "manual" ]; then
-    build_command_manual
-    out "${C_PROMPT}container@pterodactyl~ ${C_RESET}${MANUAL_CMD}"
+    if ! build_command_manual; then
+        exit 1
+    fi
+    out "${C_PROMPT}container@pterodactyl~ ${C_RESET}${MANUAL_CMD[*]}"
 else
     build_command
     out "${C_PROMPT}container@pterodactyl~ ${C_RESET}${CMD[*]}"
@@ -1776,7 +1788,6 @@ flush_log
 startup_pause
 
 if [ "${STARTUP_MODE}" = "manual" ]; then
-    # shellcheck disable=SC2086
-    exec env ${MANUAL_CMD}
+    exec "${MANUAL_CMD[@]}"
 fi
 exec "${CMD[@]}"
