@@ -1248,45 +1248,193 @@ install_arclight() {
     verify_sha "${JARFILE}" "${SHA}" sha256
 }
 
-case "${SOFTWARE}" in
-    paper|folia|velocity|waterfall) install_paper_family "${SOFTWARE}" ;;
-    purpur)                         install_purpur ;;
-    leaf)                           install_leaf ;;
-    gale)                           install_gale ;;
-    spigot)                         install_spigot ;;
-    sponge)                         install_sponge ;;
-    nanolimbo)                      install_nanolimbo ;;
-    vanilla)                        install_vanilla ;;
-    fabric)                         install_fabric ;;
-    quilt)                          install_quilt ;;
-    forge)                          install_forge ;;
-    neoforge)                       install_neoforge ;;
-    bungeecord)                     install_bungeecord ;;
-    pufferfish)                     install_pufferfish ;;
-    mohist)                         install_mohist ;;
-    arclight)                       install_arclight ;;
-    *)
-        echo "ERROR: software desconocido '${SOFTWARE}'." >&2
-        echo "Valores validos: paper, folia, purpur, pufferfish, leaf, gale," >&2
-        echo "                 spigot, vanilla, sponge, fabric, quilt, forge," >&2
-        echo "                 neoforge, mohist, arclight, velocity, waterfall," >&2
-        echo "                 bungeecord, nanolimbo, none" >&2
-        exit 1
-        ;;
-esac
+# --- mcjars ----------------------------------------------------------------
+# Instalador universal, y la unica pieza del egg que no resuelve un proyecto
+# concreto contra su propia API.
+#
+# Sirve para dos cosas. La primera: reproducir en el boton nativo de Reinstalar
+# exactamente lo que dejo el modulo Hex Minecraft Versions, incluida la build,
+# que hasta ahora se perdia. La segunda: instalar el software que este egg no
+# trae escrito a mano, que es lo que permitio ampliar SERVER_SOFTWARE sin que
+# ampliarlo fuera ofrecer un error.
+#
+# Los instaladores propios de mas arriba siguen siendo la primera opcion cuando
+# existen: no dependen de un tercero, y son la red si mcjars no responde.
+MCJARS_URL="${MCJARS_URL:-https://versions.mcjars.app}"
+MCJARS_INSTALLED=0
+
+# Ni la ruta ni el archivo de un paso pueden salir de /mnt/server. Vienen de un
+# servicio externo, asi que se comprueban aunque hoy sean de fiar.
+mcjars_safe_path() {
+    case "$1" in
+        ''|/*|*..*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# Ejecuta los pasos de instalacion que mcjars publica para una build concreta.
+# Devuelve 1 sin ruido si no puede: quien llama decide si hay alternativa.
+install_mcjars_build() {
+    MCJARS_ID="$1"
+
+    echo "Consultando en mcjars la build ${MCJARS_ID}..."
+    MCJARS_JSON=$(fetch_meta -X POST -H 'Content-Type: application/json' \
+        -d "{\"id\":${MCJARS_ID}}" \
+        "${MCJARS_URL}/api/v2/build?fields=id,type,versionId,projectVersionId,name,installation" 2>/dev/null || true)
+
+    if [ -z "${MCJARS_JSON}" ] || [ "$(printf '%s' "${MCJARS_JSON}" | jq -r '.success // false' 2>/dev/null)" != "true" ]; then
+        echo "Aviso: mcjars no respondio para la build ${MCJARS_ID}."
+        return 1
+    fi
+
+    MCJARS_TYPE=$(printf '%s' "${MCJARS_JSON}" | jq -r '.build.type // empty' | tr '[:upper:]' '[:lower:]')
+    if [ -z "${MCJARS_TYPE}" ]; then
+        echo "Aviso: la build ${MCJARS_ID} ya no existe en mcjars."
+        return 1
+    fi
+
+    # Un cliente puede haber cambiado el software a mano en la pestana Arranque
+    # despues de instalar. Su eleccion manda sobre la build guardada: si no, el
+    # servidor volveria a lo anterior sin que nadie entienda por que.
+    if [ "${MCJARS_TYPE}" != "${SOFTWARE}" ]; then
+        echo "La build guardada es de ${MCJARS_TYPE} y se pidio ${SOFTWARE}; se ignora."
+        return 1
+    fi
+
+    printf '%s' "${MCJARS_JSON}" | jq -c '.build.installation[]? | .[]?' > /tmp/mcjars-steps.json 2>/dev/null || true
+    if [ ! -s /tmp/mcjars-steps.json ]; then
+        echo "Aviso: la build ${MCJARS_ID} no trae instrucciones de instalacion."
+        return 1
+    fi
+
+    echo "Instalando ${SOFTWARE} ${VERSION} desde mcjars (build $(printf '%s' "${MCJARS_JSON}" | jq -r '.build.name // empty'))."
+
+    # Los pasos se leen de un archivo y no de una tuberia: en una tuberia el
+    # bucle corre en un subshell y el fallo de un paso no pararia nada.
+    while IFS= read -r MCJARS_STEP; do
+        MCJARS_STEP_TYPE=$(printf '%s' "${MCJARS_STEP}" | jq -r '.type // empty')
+        case "${MCJARS_STEP_TYPE}" in
+            download)
+                MCJARS_STEP_URL=$(printf '%s' "${MCJARS_STEP}" | jq -r '.url // empty')
+                MCJARS_STEP_FILE=$(printf '%s' "${MCJARS_STEP}" | jq -r '.file // empty')
+                if [ -z "${MCJARS_STEP_URL}" ] || ! mcjars_safe_path "${MCJARS_STEP_FILE}"; then
+                    echo "ERROR: paso de descarga no valido en la receta de mcjars." >&2
+                    return 1
+                fi
+                echo "Descargando ${MCJARS_STEP_FILE}..."
+                fetch -o "${MCJARS_STEP_FILE}" "${MCJARS_STEP_URL}" || return 1
+                ;;
+            unzip)
+                MCJARS_STEP_FILE=$(printf '%s' "${MCJARS_STEP}" | jq -r '.file // empty')
+                MCJARS_STEP_DIR=$(printf '%s' "${MCJARS_STEP}" | jq -r '.location // "."')
+                mcjars_safe_path "${MCJARS_STEP_FILE}" || return 1
+                if [ "${MCJARS_STEP_DIR}" = "." ]; then
+                    MCJARS_STEP_DIR="."
+                else
+                    mcjars_safe_path "${MCJARS_STEP_DIR}" || return 1
+                    mkdir -p "${MCJARS_STEP_DIR}"
+                fi
+                echo "Extrayendo ${MCJARS_STEP_FILE}..."
+                unzip -o -q "${MCJARS_STEP_FILE}" -d "${MCJARS_STEP_DIR}" || return 1
+                ;;
+            remove)
+                MCJARS_STEP_DIR=$(printf '%s' "${MCJARS_STEP}" | jq -r '.location // empty')
+                mcjars_safe_path "${MCJARS_STEP_DIR}" || return 1
+                rm -rf "${MCJARS_STEP_DIR}"
+                ;;
+        esac
+    done < /tmp/mcjars-steps.json
+
+    rm -f /tmp/mcjars-steps.json
+    echo "Instalacion desde mcjars completada."
+    return 0
+}
+
+# Ultima build publicada de una version. Es el camino de un servidor que se crea
+# con un software que este egg no trae escrito, por ejemplo desde WHMCS.
+mcjars_latest_build() {
+    MCJARS_LOOKUP_TYPE=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+    MCJARS_LOOKUP_VERSION="$2"
+
+    if [ -z "${MCJARS_LOOKUP_VERSION}" ] || [ "${MCJARS_LOOKUP_VERSION}" = "latest" ]; then
+        fetch_meta "${MCJARS_URL}/api/v2/builds/${MCJARS_LOOKUP_TYPE}?fields=id" 2>/dev/null \
+            | jq -r '[.builds[]? | .latest.id] | last // empty' 2>/dev/null || true
+        return 0
+    fi
+
+    # Las builds vienen de la mas nueva a la mas antigua; se prefiere la primera
+    # que no este marcada como experimental, y si no hay ninguna, la mas nueva.
+    fetch_meta "${MCJARS_URL}/api/v2/builds/${MCJARS_LOOKUP_TYPE}/${MCJARS_LOOKUP_VERSION}?fields=id,experimental" 2>/dev/null \
+        | jq -r '([.builds[]? | select(.experimental == false)] + [.builds[]?])[0].id // empty' 2>/dev/null || true
+}
+
+# Una build guardada por el modulo de versiones describe la instalacion exacta
+# que hay que reproducir, asi que gana a los instaladores propios. Una solicitud
+# en curso no: esa es mas reciente que la build, y es la que se esta atendiendo.
+if [ -n "${HEXMINECRAFTVERSION_BUILD:-}" ] && [ "${VERSION_REQUEST}" = "0" ] && [ "${MODPACK_REQUEST}" = "0" ]; then
+    if install_mcjars_build "${HEXMINECRAFTVERSION_BUILD}"; then
+        MCJARS_INSTALLED=1
+    else
+        echo "Se continua con el instalador propio de ${SOFTWARE}."
+    fi
+fi
+
+
+if [ "${MCJARS_INSTALLED}" = "0" ]; then
+    case "${SOFTWARE}" in
+        paper|folia|velocity|waterfall) install_paper_family "${SOFTWARE}" ;;
+        purpur)                         install_purpur ;;
+        leaf)                           install_leaf ;;
+        gale)                           install_gale ;;
+        spigot)                         install_spigot ;;
+        sponge)                         install_sponge ;;
+        nanolimbo)                      install_nanolimbo ;;
+        vanilla)                        install_vanilla ;;
+        fabric)                         install_fabric ;;
+        quilt)                          install_quilt ;;
+        forge)                          install_forge ;;
+        neoforge)                       install_neoforge ;;
+        bungeecord)                     install_bungeecord ;;
+        pufferfish)                     install_pufferfish ;;
+        mohist)                         install_mohist ;;
+        arclight)                       install_arclight ;;
+        *)
+            # Software que este egg no trae escrito a mano. mcjars lo publica, asi
+            # que se resuelve su ultima build y se instala desde ahi. Sin esto,
+            # ampliar la lista de SERVER_SOFTWARE seria ofrecer un error.
+            MCJARS_FALLBACK=$(mcjars_latest_build "${SOFTWARE}" "${VERSION}" || true)
+            if [ -n "${MCJARS_FALLBACK}" ] && install_mcjars_build "${MCJARS_FALLBACK}"; then
+                MCJARS_INSTALLED=1
+            else
+                echo "ERROR: no se pudo instalar '${SOFTWARE}'." >&2
+                echo "Ni este egg trae un instalador propio para el, ni mcjars pudo" >&2
+                echo "resolver una build para la version '${VERSION}'." >&2
+                echo "Revisa el software y la version en la pestana Arranque." >&2
+                exit 1
+            fi
+            ;;
+    esac
+fi
 
 # Forge, NeoForge and Quilt start from files the installer generated, not from a
 # jar this script placed, so the size check below does not apply to them.
-case "${SOFTWARE}" in
-    forge|neoforge|quilt) ;;
-    *)
-        if [ ! -s "${JARFILE}" ]; then
-            echo "ERROR: ${JARFILE} no existe o quedo vacio tras la descarga." >&2
-            exit 1
-        fi
-        echo "Se descargaron $(du -h "${JARFILE}" | cut -f1) en ${JARFILE}"
-        ;;
-esac
+#
+# mcjars deja el servidor de formas distintas segun el software —un jar suelto,
+# un arbol de librerias, un archivo de argumentos— y su propia extraccion ya
+# habria fallado si algo no hubiera llegado. Exigirle aqui un jar concreto solo
+# serviria para rechazar instalaciones correctas.
+if [ "${MCJARS_INSTALLED}" = "0" ]; then
+    case "${SOFTWARE}" in
+        forge|neoforge|quilt) ;;
+        *)
+            if [ ! -s "${JARFILE}" ]; then
+                echo "ERROR: ${JARFILE} no existe o quedo vacio tras la descarga." >&2
+                exit 1
+            fi
+            echo "Se descargaron $(du -h "${JARFILE}" | cut -f1) en ${JARFILE}"
+            ;;
+    esac
+fi
 
 # Prepare the default proxy configuration during installation so the runtime
 # entrypoint can replace its bind port before the very first public start.
