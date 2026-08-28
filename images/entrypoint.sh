@@ -1638,6 +1638,50 @@ required_java_for() {
     esac
 }
 
+# Forge 61.x (1.21.11 y siguientes) dejo de meter el classpath en unix_args.txt
+# y lo redujo a un lanzador:
+#
+#   -Djava.net.preferIPv6Addresses=system -jar forge-1.21.11-61.2.1-shim.jar
+#
+# Ese '-jar' se resuelve contra el directorio de trabajo, que es la raiz del
+# servidor. El instalador oficial de Forge deja ahi el shim; mcjars, que
+# normaliza todo a 'server.jar', lo deja solo dentro de libraries/. Con la
+# receta de mcjars el arranque muere con:
+#
+#   Error: Unable to access jarfile forge-<version>-shim.jar
+#
+# El shim de libraries/ y el server.jar de la raiz son el mismo archivo byte a
+# byte, asi que basta con dejarlo tambien con el nombre que el lanzador espera.
+# Se repara aqui y no en el instalador a proposito: asi un servidor ya instalado
+# arranca en el siguiente intento, sin reinstalar.
+#
+# NeoForge no esta afectado: su args file usa '-classpath' con rutas relativas.
+ensure_args_jar() {
+    [ -n "${ARGS_FILE}" ] && [ -f "${ARGS_FILE}" ] || return 0
+
+    local wanted
+    wanted=$(tr ' \t' '\n\n' < "${ARGS_FILE}" | grep -A1 -x -- '-jar' | tail -1)
+    case "${wanted}" in
+        ''|-*|*/*) return 0 ;;
+    esac
+    [ -f "${wanted}" ] && return 0
+
+    local origen
+    for origen in "$(dirname "${ARGS_FILE}")/${wanted}" "${SERVER_JARFILE}" server.jar; do
+        if [ -n "${origen}" ] && [ -f "${origen}" ]; then
+            if cp -f "${origen}" "${wanted}" 2>/dev/null; then
+                log_info "Lanzador de Forge restaurado como '${wanted}'."
+                return 0
+            fi
+            break
+        fi
+    done
+
+    log_warn "El args file pide '${wanted}' y no esta en la carpeta del servidor."
+    log_warn "Reinstala el servidor desde el panel si no arranca."
+    return 0
+}
+
 validate() {
     is_true "${VALIDATE_STARTUP}" || return 0
 
@@ -1754,6 +1798,7 @@ if is_true "${AUTO_UPDATE}"; then
     detect_server_type
 fi
 
+ensure_args_jar
 accept_eula
 apply_proxy_config
 optimize_configs
