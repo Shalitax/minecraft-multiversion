@@ -23,11 +23,9 @@
         "Java 8 (OpenJ9)": "ghcr.io/shalitax/minecraft-multiversion:java_8j9"
     },
     "file_denylist": [
-        ".multiversion-software",
-        ".multiversion-version",
         ".multiversion-update",
         ".multiversion-optimized",
-        ".hexminecraftversion-installed.json",
+        ".multiversion-consumed-nonce",
         ".hexminecraftmodpacks-installed.json"
     ],
     "startup": "java -Xms{{SERVER_MIN_MEMORY}}M -Xmx{{SERVER_MEMORY}}M -jar {{SERVER_JARFILE}} nogui",

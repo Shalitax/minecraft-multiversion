@@ -46,6 +46,29 @@ jobs:
           if (egg.meta?.version !== 'PTDL_v2') fail('meta.version debe ser PTDL_v2');
           if (!egg.scripts?.installation?.script) fail('falta el script de instalacion');
           if (!Object.keys(egg.docker_images || {}).length) fail('docker_images esta vacio');
+          // Wings comprueba el denylist al escribir, no al borrar. Estas tres
+          // marcas las escribe ahora Hex Minecraft Versions por la API de
+          // archivos, donde es indistinguible del cliente: protegerlas aqui
+          // hace que toda instalacion falle al final, con la version anterior
+          // ya retirada. Las escribia el egg cuando el egg descargaba.
+          const escribeElModulo = [
+            '.multiversion-software',
+            '.multiversion-version',
+            '.hexminecraftversion-installed.json',
+          ];
+          for (const entrada of egg.file_denylist || []) {
+            const nombre = String(entrada).trim().replace(/^\/+/, '');
+            if (escribeElModulo.includes(nombre)) {
+              fail(`file_denylist protege ${nombre}, que escribe el modulo de versiones`);
+            }
+          }
+          // Y al reves: el nonce consumido solo lo escribe este instalador,
+          // desde dentro del contenedor. Sin proteger, borrarlo hace que una
+          // solicitud de modpack ya atendida vuelva a parecer nueva.
+          if (!(egg.file_denylist || []).includes('.multiversion-consumed-nonce')) {
+            fail('file_denylist debe proteger .multiversion-consumed-nonce');
+          }
+
           const seen = new Set();
           for (const variable of egg.variables || []) {
             if (seen.has(variable.env_variable)) fail(`variable duplicada: ${variable.env_variable}`);
