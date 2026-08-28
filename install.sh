@@ -49,6 +49,7 @@ MODPACK_NONCE=""
 # remain "none" in the Panel while the installer still receives the requested
 # software and release. The file is removed before doing anything destructive.
 REQUEST_FILE="/mnt/server/.hexminecraftversion-request"
+VERSION_REQUEST=0
 if [ -f "${REQUEST_FILE}" ]; then
     request_value() {
         sed -n "s/^$1=//p" "${REQUEST_FILE}" | head -1 | tr -d '\r'
@@ -113,12 +114,21 @@ if [ -f "${REQUEST_FILE}" ]; then
     esac
 
     INSTALL_MODE="${REQUEST_MODE}"
+    VERSION_REQUEST=1
     echo "Solicitud recibida desde Hex Minecraft Versions."
 fi
 
 # Modpack installation request. This is intentionally separate from the
 # version request: a modpack chooses its own loader and Minecraft release.
-if [ -n "${MODPACK_REQUEST_B64}" ]; then
+#
+# The two are mutually exclusive and this block runs second, so without the
+# guard below a leftover modpack request silently overwrote VERSION with its
+# "modpack" sentinel right after the version request had set a real release.
+# The installer then got software=neoforge with version=modpack and aborted.
+# Whoever asked last is who gets served, and here that is the version request.
+if [ -n "${MODPACK_REQUEST_B64}" ] && [ "${VERSION_REQUEST:-0}" = "1" ]; then
+    echo "Hay una solicitud de Hex Minecraft Versions en curso; la del modpack se ignora."
+elif [ -n "${MODPACK_REQUEST_B64}" ]; then
     if [ "${HEXMINECRAFTMODPACK_PROTOCOL:-}" != "2" ]; then
         echo "ERROR: solicitud de Hex Minecraft Modpacks incompatible." >&2
         exit 1
@@ -152,8 +162,13 @@ if [ -n "${MODPACK_REQUEST_B64}" ]; then
         *[!a-f0-9]*) echo "ERROR: nonce de modpack no valido." >&2; exit 1 ;;
     esac
 
+    # El archivo dedicado manda; el marcador del modpack se sigue leyendo para
+    # los servidores instalados antes de que el nonce se guardara aparte.
     CONSUMED_NONCE=""
-    if [ -f .hexminecraftmodpacks-installed.json ]; then
+    if [ -f .multiversion-consumed-nonce ]; then
+        CONSUMED_NONCE=$(head -1 .multiversion-consumed-nonce 2>/dev/null | tr -d '\r' || true)
+    fi
+    if [ -z "${CONSUMED_NONCE}" ] && [ -f .hexminecraftmodpacks-installed.json ]; then
         CONSUMED_NONCE=$(jq -r '.request_nonce // empty' .hexminecraftmodpacks-installed.json 2>/dev/null || true)
     fi
 
@@ -442,6 +457,16 @@ if [ "${SOFTWARE}" = "none" ]; then
             --arg installed_at "${INSTALLED_AT}" \
             '{protocol:2,provider:$provider,modpack_id:$modpack_id,modpack_name:$modpack_name,modpack_version_id:$modpack_version_id,modpack_version_name:$modpack_version_name,minecraft_version:$minecraft_version,loader:$loader,request_nonce:$request_nonce,installed_at:$installed_at}' \
             > .hexminecraftmodpacks-installed.json
+
+        # El nonce gastado, aparte y en su propio archivo.
+        #
+        # Vivia dentro del marcador de arriba, que describe el modpack instalado
+        # y por tanto se borra al cambiar de software. Al borrarlo se perdia la
+        # unica prueba de que la solicitud ya se habia atendido, asi que el nonce
+        # volvia a parecer nuevo y la siguiente instalacion repetia el modpack.
+        # Son dos hechos distintos y ahora viven en dos sitios distintos: este
+        # archivo sobrevive a la limpieza porque no describe lo que hay en disco.
+        printf '%s\n' "${MODPACK_NONCE}" > .multiversion-consumed-nonce
 
         case "$(echo "${EULA}" | tr '[:upper:]' '[:lower:]')" in
             false|0|no|desactivado)

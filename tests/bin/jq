@@ -1,0 +1,50 @@
+#!/bin/bash
+# Sustituto minimo de jq para el banco de pruebas del egg.
+#
+# Solo cubre las invocaciones que hace install.sh en su bloque de resolucion de
+# solicitudes: la validacion con -e (que aqui se da por buena, porque lo que se
+# esta probando es el control de flujo, no el validador) y la lectura de un
+# campo con -r, desde stdin o desde un archivo.
+
+MODO=""
+FILTRO=""
+ARCHIVO=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -e) MODO="e"; shift ;;
+        -r) MODO="r"; shift ;;
+        -n) MODO="n"; shift ;;
+        --arg) shift 2 ;;
+        -*) shift ;;
+        *)
+            if [ -z "$FILTRO" ]; then FILTRO="$1"; else ARCHIVO="$1"; fi
+            shift
+            ;;
+    esac
+done
+
+if [ "$MODO" = "e" ]; then
+    # La validacion del payload se da por superada.
+    exit 0
+fi
+
+if [ -n "$ARCHIVO" ]; then
+    ENTRADA=$(cat "$ARCHIVO" 2>/dev/null)
+else
+    ENTRADA=$(cat)
+fi
+
+CAMPO=$(printf '%s' "$FILTRO" | sed 's/^\.//; s/ *\/\/ *empty$//; s/ *| *tostring$//')
+
+printf '%s' "$ENTRADA" | node -e '
+let bruto = "";
+process.stdin.on("data", (d) => (bruto += d));
+process.stdin.on("end", () => {
+  let obj;
+  try { obj = JSON.parse(bruto); } catch (e) { process.exit(0); }
+  const v = obj[process.argv[1]];
+  if (v === undefined || v === null) { process.exit(0); }
+  process.stdout.write(String(v) + "\n");
+});
+' "$CAMPO"
