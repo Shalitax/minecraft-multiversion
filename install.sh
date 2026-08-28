@@ -1262,6 +1262,9 @@ install_arclight() {
 # existen: no dependen de un tercero, y son la red si mcjars no responde.
 MCJARS_URL="${MCJARS_URL:-https://versions.mcjars.app}"
 MCJARS_INSTALLED=0
+MCJARS_BUILD_ID=""
+MCJARS_BUILD_NAME=""
+MCJARS_BUILD_JAVA=""
 
 # Ni la ruta ni el archivo de un paso pueden salir de /mnt/server. Vienen de un
 # servicio externo, asi que se comprueban aunque hoy sean de fiar.
@@ -1346,6 +1349,16 @@ install_mcjars_build() {
     done < /tmp/mcjars-steps.json
 
     rm -f /tmp/mcjars-steps.json
+
+    # El resumen que se escribe al final tiene que decir lo mismo que dijo el
+    # modulo cuando instalo esta build. Sin estos dos campos, un Reinstalar
+    # nativo reproduce los archivos correctos pero borra del resumen la build y
+    # la Java, y el panel vuelve a deducir la Java del numero de version, que
+    # con un proxy da un resultado equivocado.
+    MCJARS_BUILD_ID="${MCJARS_ID}"
+    MCJARS_BUILD_NAME=$(printf '%s' "${MCJARS_JSON}" | jq -r '.build.name // .build.projectVersionId // empty')
+    MCJARS_BUILD_JAVA=$(printf '%s' "${MCJARS_JSON}" | jq -r '.version.java // empty' | tr -cd '0-9')
+
     echo "Instalacion desde mcjars completada."
     return 0
 }
@@ -1468,8 +1481,25 @@ echo "${VERSION}" > .multiversion-version
 # Machine-readable state for Hex Minecraft Versions. SOFTWARE and VERSION are
 # allowlisted above, so neither can break the JSON string.
 INSTALLED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)
-printf '{"protocol":1,"software":"%s","release":"%s","installed_at":"%s"}\n' \
-    "${SOFTWARE}" "${VERSION}" "${INSTALLED_AT}" > .hexminecraftversion-installed.json
+
+# Cuando la instalacion vino de una build de mcjars, el resumen la nombra igual
+# que lo habria hecho el modulo. El nombre lo publica un servicio de terceros,
+# asi que se recorta a caracteres que no pueden romper la cadena JSON en vez de
+# confiar en que venga limpio.
+MCJARS_BUILD_EXTRA=""
+MCJARS_BUILD_NUM=$(printf '%s' "${MCJARS_BUILD_ID}" | tr -cd '0-9')
+if [ "${MCJARS_INSTALLED}" = "1" ] && [ -n "${MCJARS_BUILD_NUM}" ]; then
+    MCJARS_BUILD_SAFE=$(printf '%s' "${MCJARS_BUILD_NAME}" | tr -cd 'A-Za-z0-9._+-' | cut -c1-64)
+    [ -n "${MCJARS_BUILD_SAFE}" ] || MCJARS_BUILD_SAFE="${MCJARS_BUILD_NUM}"
+    MCJARS_BUILD_EXTRA=$(printf ',"build":"%s","build_id":%s' \
+        "${MCJARS_BUILD_SAFE}" "${MCJARS_BUILD_NUM}")
+    if [ -n "${MCJARS_BUILD_JAVA}" ]; then
+        MCJARS_BUILD_EXTRA="${MCJARS_BUILD_EXTRA}$(printf ',"java":%s' "${MCJARS_BUILD_JAVA}")"
+    fi
+fi
+
+printf '{"protocol":1,"software":"%s","release":"%s"%s,"installed_at":"%s"}\n' \
+    "${SOFTWARE}" "${VERSION}" "${MCJARS_BUILD_EXTRA}" "${INSTALLED_AT}" > .hexminecraftversion-installed.json
 
 # Proxies have no EULA and no server.properties, and neither does NanoLimbo:
 # it never runs Minecraft itself, it only speaks the protocol.

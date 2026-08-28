@@ -16,6 +16,9 @@
 set -u
 
 INSTALL_SH="${1:-$(dirname "$0")/../install.sh}"
+# Absoluta desde el principio: el banco se mete en su directorio de trabajo para
+# instalar de verdad, y a partir de ahi una ruta relativa ya no apunta a nada.
+INSTALL_SH="$(cd "$(dirname "${INSTALL_SH}")" && pwd)/$(basename "${INSTALL_SH}")"
 
 # El jq de tests/bin es un remedo con lo justo para el banco de solicitudes;
 # aqui hacen falta filtros de verdad. Se acepta uno por argumento para poder
@@ -154,6 +157,86 @@ else
         comprobar "no deja archivos temporales" "quedo mcvapi.server.jar.zip"
     else
         comprobar "no deja archivos temporales" ok
+    fi
+
+    # El resumen que escribe el egg tiene que decir lo mismo que dijo el modulo
+    # cuando instalo esta build. Sin build ni java, un Reinstalar nativo
+    # reproduce los archivos correctos pero vacia el resumen, y el panel vuelve
+    # a deducir la Java del numero de version —que en un proxy no es una version
+    # de Minecraft y da un resultado equivocado.
+    if [ "${MCJARS_BUILD_ID}" = "${BUILD_LIMBO}" ]; then
+        comprobar "recuerda la build instalada" ok
+    else
+        comprobar "recuerda la build instalada" "guardo '${MCJARS_BUILD_ID}'"
+    fi
+
+    if [ -n "${MCJARS_BUILD_NAME}" ]; then
+        comprobar "recuerda el nombre de la build" ok
+    else
+        comprobar "recuerda el nombre de la build" "quedo vacio"
+    fi
+
+    case "${MCJARS_BUILD_JAVA}" in
+        ''|*[!0-9]*) comprobar "recuerda la Java que pide la version" "guardo '${MCJARS_BUILD_JAVA}'" ;;
+        *)           comprobar "recuerda la Java que pide la version" ok ;;
+    esac
+fi
+
+# --- El resumen en disco ----------------------------------------------------
+# El bloque que lo escribe queda fuera del corte de arriba, asi que se recorta
+# aparte y se ejecuta con lo que dejo la instalacion de verdad.
+RESUMEN_INICIO=$(grep -n '^MCJARS_BUILD_EXTRA=""' "${INSTALL_SH}" | head -1 | cut -d: -f1)
+RESUMEN_FIN=$(grep -n '> \.hexminecraftversion-installed\.json$' "${INSTALL_SH}" | head -1 | cut -d: -f1)
+
+if [ -z "${RESUMEN_INICIO}" ] || [ -z "${RESUMEN_FIN}" ]; then
+    comprobar "se encuentra el bloque del resumen" "el corte del banco esta desfasado"
+else
+    sed -n "${RESUMEN_INICIO},${RESUMEN_FIN}p" "${INSTALL_SH}" > "${TRABAJO}/resumen.sh"
+    cd "${TRABAJO}" || exit 2
+    MCJARS_INSTALLED=1
+    SOFTWARE="nanolimbo"
+    VERSION="latest"
+    INSTALLED_AT="2026-08-28T00:00:00Z"
+    # shellcheck disable=SC1090
+    . "${TRABAJO}/resumen.sh"
+
+    if jq -e . .hexminecraftversion-installed.json >/dev/null 2>&1; then
+        comprobar "el resumen es JSON valido" ok
+    else
+        comprobar "el resumen es JSON valido" "$(cat .hexminecraftversion-installed.json)"
+    fi
+
+    for CAMPO in build build_id java; do
+        if [ "$(jq -r ".${CAMPO} // empty" .hexminecraftversion-installed.json 2>/dev/null)" != "" ]; then
+            comprobar "el resumen lleva '${CAMPO}'" ok
+        else
+            comprobar "el resumen lleva '${CAMPO}'" "falta"
+        fi
+    done
+
+    # Un nombre de build lo publica un servicio de terceros. Si llegara con una
+    # comilla, romperia la cadena JSON y el modulo dejaria de leer el resumen
+    # entero, no solo ese campo.
+    MCJARS_BUILD_NAME='ro"to
+raro'
+    # shellcheck disable=SC1090
+    . "${TRABAJO}/resumen.sh"
+
+    if jq -e . .hexminecraftversion-installed.json >/dev/null 2>&1; then
+        comprobar "un nombre de build con comillas no rompe el resumen" ok
+    else
+        comprobar "un nombre de build con comillas no rompe el resumen" "$(cat .hexminecraftversion-installed.json)"
+    fi
+
+    # Y sin build no puede quedar un campo a medias.
+    MCJARS_INSTALLED=0
+    # shellcheck disable=SC1090
+    . "${TRABAJO}/resumen.sh"
+
+    if jq -e '.build == null and .software == "nanolimbo"' .hexminecraftversion-installed.json >/dev/null 2>&1; then
+        comprobar "una instalacion sin mcjars no inventa build" ok
+    else
+        comprobar "una instalacion sin mcjars no inventa build" "$(cat .hexminecraftversion-installed.json)"
     fi
 fi
 
