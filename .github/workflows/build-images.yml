@@ -244,8 +244,19 @@ jobs:
     # not generate an egg that references tags which do not exist.
     if: github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || github.event.inputs.tags == '')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build immutable production egg
         run: |
@@ -261,11 +272,37 @@ jobs:
           fs.writeFileSync('dist/egg-minecraft-multiversion.json', JSON.stringify(egg, null, 4) + '\n');
           NODE
 
+      - name: Record immutable image digests
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILT_AT: ${{ needs.prepare.outputs.built }}
+        run: |
+          jq -n \
+            --arg version "$VERSION" \
+            --arg built_at "$BUILT_AT" \
+            --arg revision "${{ github.sha }}" \
+            '{version: $version, built_at: $built_at, revision: $revision, images: []}' \
+            > dist/images-manifest.json
+
+          for tag in 25 21 17 17j9 16 11 8 8j9; do
+            ref="${IMAGE}:java_${tag}-${VERSION}"
+            digest=$(docker buildx imagetools inspect "$ref" | awk '/^Digest:/ {print $2; exit}')
+            if ! printf '%s' "$digest" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+              echo "No se pudo resolver el digest de $ref" >&2
+              exit 1
+            fi
+            jq --arg tag "$tag" --arg ref "$ref" --arg digest "$digest" \
+              '.images += [{java: $tag, reference: $ref, digest: $digest, pinned: ($ref + "@" + $digest)}]' \
+              dist/images-manifest.json > dist/images-manifest.next.json
+            mv dist/images-manifest.next.json dist/images-manifest.json
+          done
+
       - name: Upload immutable production egg
         uses: actions/upload-artifact@v4
         with:
           name: minecraft-multiversion-egg-${{ needs.prepare.outputs.version }}
-          path: dist/egg-minecraft-multiversion.json
+          path: dist/
           if-no-files-found: error
 
       - name: Report published images
@@ -274,6 +311,7 @@ jobs:
             echo "## Images published"
             echo
             echo 'Package: `${{ needs.prepare.outputs.image }}` (8 tags on one package)'
+            echo 'The artifact also includes `images-manifest.json` with every immutable tag and registry digest.'
             echo
             echo '> If this package is new, set it to **Public** once:'
             echo '> Profile → Packages → minecraft-multiversion → Package settings → Change visibility.'
@@ -291,7 +329,7 @@ jobs:
                 *)   label="Java $t" ;;
               esac
               comma=","; [ "$t" = "8j9" ] && comma=""
-              echo "    \"$label\": \"${{ needs.prepare.outputs.image }}:java_$t\"$comma"
+              echo "    \"$label\": \"${{ needs.prepare.outputs.image }}:java_$t-${{ needs.prepare.outputs.version }}\"$comma"
             done
             echo '}'
             echo '```'

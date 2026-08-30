@@ -1415,20 +1415,27 @@ INSTALLED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)
 # que lo habria hecho el modulo. El nombre lo publica un servicio de terceros,
 # asi que se recorta a caracteres que no pueden romper la cadena JSON en vez de
 # confiar en que venga limpio.
-MCJARS_BUILD_EXTRA=""
-MCJARS_BUILD_NUM=$(printf '%s' "${MCJARS_BUILD_ID}" | tr -cd '0-9')
-if [ "${MCJARS_INSTALLED}" = "1" ] && [ -n "${MCJARS_BUILD_NUM}" ]; then
+MCJARS_BUILD_NUM=""
+MCJARS_BUILD_SAFE=""
+if [ "${MCJARS_INSTALLED}" = "1" ]; then
+    MCJARS_BUILD_NUM=$(printf '%s' "${MCJARS_BUILD_ID}" | tr -cd '0-9')
+fi
+if [ -n "${MCJARS_BUILD_NUM}" ]; then
     MCJARS_BUILD_SAFE=$(printf '%s' "${MCJARS_BUILD_NAME}" | tr -cd 'A-Za-z0-9._+-' | cut -c1-64)
     [ -n "${MCJARS_BUILD_SAFE}" ] || MCJARS_BUILD_SAFE="${MCJARS_BUILD_NUM}"
-    MCJARS_BUILD_EXTRA=$(printf ',"build":"%s","build_id":%s' \
-        "${MCJARS_BUILD_SAFE}" "${MCJARS_BUILD_NUM}")
-    if [ -n "${MCJARS_BUILD_JAVA}" ]; then
-        MCJARS_BUILD_EXTRA="${MCJARS_BUILD_EXTRA}$(printf ',"java":%s' "${MCJARS_BUILD_JAVA}")"
-    fi
 fi
 
-printf '{"protocol":1,"software":"%s","release":"%s"%s,"installed_at":"%s"}\n' \
-    "${SOFTWARE}" "${VERSION}" "${MCJARS_BUILD_EXTRA}" "${INSTALLED_AT}" > .hexminecraftversion-installed.json
+jq -n \
+    --arg software "${SOFTWARE}" \
+    --arg release "${VERSION}" \
+    --arg installed_at "${INSTALLED_AT}" \
+    --arg build "${MCJARS_BUILD_SAFE}" \
+    --arg build_id "${MCJARS_BUILD_NUM}" \
+    --arg java "${MCJARS_BUILD_JAVA}" '
+    {protocol: 1, software: $software, release: $release, installed_at: $installed_at}
+    + (if $build_id != "" then {build: $build, build_id: ($build_id | tonumber)} else {} end)
+    + (if $java != "" then {java: ($java | tonumber)} else {} end)
+' > .hexminecraftversion-installed.json
 
 # Proxies have no EULA and no server.properties, and neither does NanoLimbo:
 # it never runs Minecraft itself, it only speaks the protocol.

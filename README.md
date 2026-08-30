@@ -12,7 +12,7 @@ Minecraft Multiversion/
 ├── install.sh                        ← fuente del script de instalación (ya embebido en el JSON)
 ├── README.md
 ├── .github/workflows/
-│   └── build-images.yml              ← construye y publica las 17 imágenes
+│   └── build-images.yml              ← construye y publica las 8 imágenes
 └── images/
     ├── entrypoint.sh                 ← toda la lógica vive aquí
     ├── build.sh                      ← build local (alternativa al workflow)
@@ -34,17 +34,21 @@ durante la preparación del pack. El propio script instala también `curl`, `jq`
 
 ### Opción A — GitHub Actions (recomendada, no requiere Docker)
 
-Sube esta carpeta como repo. `.github/workflows/build-images.yml` construye y publica las 17 variantes a GHCR.
+Sube esta carpeta como repo. `.github/workflows/build-images.yml` construye y publica las 8 variantes a GHCR.
 
 No hay que configurar nada: el workflow deriva el namespace de `github.repository_owner`, así que publica en `ghcr.io/TU-USUARIO/minecraft-multiversion` automáticamente.
 
 Se dispara con push a `main` (solo si cambió `images/**`), a mano desde la pestaña Actions, y una vez al mes para recoger parches de las imágenes base. Los PRs construyen para verificar pero no publican. Con `workflow_dispatch` puedes pasar `21 17` para construir solo esos tags.
 
-El job `summary` imprime al final el bloque `docker_images` ya listo para pegar en el egg.
+El job `summary` genera un artefacto de producción con dos archivos: un egg que apunta a tags
+inmutables (`java_21-AAAAMMDD-commit`) y `images-manifest.json`, donde quedan registrados el tag,
+el digest de GHCR y la referencia fijada de cada una de las ocho imágenes. También imprime el
+bloque `docker_images` exacto que publicó esa ejecución.
 
 ### Opción B — Docker local
 
-Necesita Docker Desktop con WSL2, y QEMU para arm64. Más lento, pero útil para iterar sobre el entrypoint sin esperar al CI.
+Necesita Docker Desktop con WSL2, y QEMU para arm64. Es útil para iterar sobre el entrypoint sin
+esperar al CI; para producción se debe usar el artefacto inmutable generado por GitHub Actions.
 
 ```bash
 cd images && REGISTRY=ghcr.io/TU-USUARIO/minecraft-multiversion ./build.sh 21
@@ -60,7 +64,7 @@ El contexto de build es `images/`, no la carpeta de cada versión, porque el `CO
 
 GHCR crea los paquetes **privados por defecto**, y Wings falla el pull con un error de credenciales poco claro.
 
-Las 17 variantes son **tags de un mismo paquete** (`minecraft-multiversion`), no 17 paquetes, así que el cambio se hace una vez: perfil → **Packages** → `minecraft-multiversion` → **Package settings** → **Change visibility** → Public.
+Las 8 variantes son **tags de un mismo paquete** (`minecraft-multiversion`), no 8 paquetes, así que el cambio se hace una vez: perfil → **Packages** → `minecraft-multiversion` → **Package settings** → **Change visibility** → Public.
 
 ### Apuntar el egg a tu registry
 
@@ -70,15 +74,21 @@ El workflow no lo necesita, pero el egg sí lleva la ruta literal de la imagen:
 ./set-registry.sh ghcr.io/TU-USUARIO/minecraft-multiversion
 ```
 
-Reemplaza las 17 entradas de `docker_images` y la variable `REGISTRY` de `build.sh`, y valida que el JSON siga siendo correcto.
+Reemplaza las 8 entradas base de `docker_images` y la variable `REGISTRY` de `build.sh`, y valida
+que el JSON siga siendo correcto. Después hay que ejecutar el workflow completo para obtener el
+egg de producción con tags inmutables y su manifiesto de digests.
 
 ### Importar el egg
 
-Panel → **Nests** → elegir un nest → **Import Egg** → subir `egg-minecraft-multiversion.json`.
+Descarga el artefacto `minecraft-multiversion-egg-*` de la ejecución aprobada, conserva junto al
+release su `images-manifest.json` y sube el `egg-minecraft-multiversion.json` incluido en ese
+artefacto: Panel → **Nests** → elegir un nest → **Import Egg**.
 
 ### Actualizar el entrypoint después
 
-Wings intenta hacer pull de la imagen cada vez que arranca un servidor. Al republicar el mismo tag con un entrypoint corregido, los servidores lo toman en el siguiente reinicio — sin tocar el egg ni reinstalar. Esa es la ventaja de tener la lógica en la imagen y no en el egg.
+No se repite un tag de producción. Una corrección crea otro tag fechado, otro manifiesto y otro
+egg; se valida en canario y luego se importa. Los tags móviles `java_21`, `java_17`, etc. quedan
+para desarrollo y no deben figurar en el egg desplegado en producción.
 
 ### Compatibilidad con Hex Minecraft Tools
 

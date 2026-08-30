@@ -185,7 +185,7 @@ fi
 # --- El resumen en disco ----------------------------------------------------
 # El bloque que lo escribe queda fuera del corte de arriba, asi que se recorta
 # aparte y se ejecuta con lo que dejo la instalacion de verdad.
-RESUMEN_INICIO=$(grep -n '^MCJARS_BUILD_EXTRA=""' "${INSTALL_SH}" | head -1 | cut -d: -f1)
+RESUMEN_INICIO=$(grep -n '^MCJARS_BUILD_NUM=' "${INSTALL_SH}" | head -1 | cut -d: -f1)
 RESUMEN_FIN=$(grep -n '> \.hexminecraftversion-installed\.json$' "${INSTALL_SH}" | head -1 | cut -d: -f1)
 
 if [ -z "${RESUMEN_INICIO}" ] || [ -z "${RESUMEN_FIN}" ]; then
