@@ -317,7 +317,7 @@
             "name": "Segundos de espera antes de arrancar",
             "description": "Tiempo que se mantiene el resumen en pantalla antes de iniciar el servidor, para que dé tiempo a leerlo. 0 lo desactiva y el máximo es 30. Ten en cuenta que estos segundos se suman a CADA reinicio del servidor.",
             "env_variable": "STARTUP_PAUSE",
-            "default_value": "8",
+            "default_value": "3",
             "user_viewable": false,
             "user_editable": false,
             "rules": "required|integer|between:0,30",
